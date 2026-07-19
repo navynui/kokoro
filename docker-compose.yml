@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./output:/app/output
     # Uncomment the next two lines if you free up GPU headroom later:
     # deploy:
     #   resources:

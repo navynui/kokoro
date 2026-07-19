@@ -12,26 +12,41 @@
 
 | File | Role |
 |---|---|
-| `docker-compose.yml` | Single service `tts`, maps host `8001` → container `8000`. Mounts `~/.cache/huggingface` for model persistence. No GPU passthrough. |
+| `docker-compose.yml` | Single service `tts`, maps host `8001` → container `8000`. Mounts `~/.cache/huggingface` (model cache) and `./output` (audio files). |
 | `Dockerfile` | `python:3.11-slim` base. Pins `kokoro>=0.9.2`, `fastapi>=0.115.0`, `uvicorn[standard]>=0.34.0`, `soundfile`, `numpy`. |
-| `server.py` | FastAPI app. Lazy-init `KPipeline` (model downloads on first request). |
+| `server.py` | FastAPI app. Serves web UI, audio file listing, and TTS endpoint. Lazy-init `KPipeline`. |
+| `static/index.html` | Single-page web UI with TTS form, inline player, file browser with play/download/share. Mobile-responsive. |
+| `.gitignore` | Ignores `output/` and `*.wav` |
 
 ## Architecture
 
 ```
-Client ──POST /v1/audio/speech──> FastAPI ──> KPipeline ──> WAV response
-              {"text", "voice", "speed"}           │
-                                              Downloads model
-                                              on first call
-                                              (~300 MB from HF)
+Browser ──GET /─────────────────> FastAPI ──> index.html (web UI)
+Browser ──GET /audio/list───────> FastAPI ──> JSON file list
+Browser ──GET /audio/{file}─────> FastAPI ──> WAV download
+Browser ──POST /v1/audio/speech─> FastAPI ──> KPipeline ──> WAV response
+             {"text","voice","speed"}         │
+                                          Downloads model
+                                          on first call
+                                          (~300 MB from HF)
 ```
 
 - `KPipeline` is initialised once (singleton) and reused across requests.
 - Pipeline uses `lang_code='a'` (American English).
 - Audio output: 24 kHz, 16-bit mono WAV.
-- Generated files written to `/tmp/tts_output/` and cleaned up by OS.
+- Generated files written to `/app/output/` (mounted to `./output/` on host).
 
 ## API Contract
+
+### `GET /`
+
+Serves the web UI (`static/index.html`).
+
+### `GET /health`
+
+```
+Response: 200 {"status": "ok"}
+```
 
 ### `POST /v1/audio/speech`
 
@@ -43,14 +58,31 @@ Request:
   "speed": float       (default 1.0)
 }
 
+Headers (response):
+  X-Audio-Filename: <uuid>.wav
+
 Response: 200 audio/wav (binary) | 500 {"detail": "..."}
 ```
 
-### `GET /health`
+### `GET /audio/list`
 
 ```
-Response: 200 {"status": "ok"}
+Response: 200
+[
+  {
+    "id": "a1b2c3d4e5f6",
+    "filename": "a1b2c3d4e5f6.wav",
+    "size": 345000,
+    "created": 1745000000.0
+  }
+]
 ```
+
+Sorted newest-first by modification time.
+
+### `GET /audio/{filename}`
+
+Serves the WAV file for playback or download. Rejects path traversal.
 
 ## Dependency Graph (pip)
 
@@ -84,7 +116,7 @@ cd ~/dev/kokoro && docker compose logs -f
 docker exec -it kokoro-tts bash
 ```
 
-### Test from host
+### Test from host (API)
 
 ```bash
 curl -X POST "http://localhost:8001/v1/audio/speech" \
@@ -92,6 +124,10 @@ curl -X POST "http://localhost:8001/v1/audio/speech" \
   -d '{"text": "Hello from agent.", "voice": "af_bella"}' \
   --output /tmp/test.wav
 ```
+
+### Test from host (web UI)
+
+Open `http://localhost:8001/` in a browser. Also works from any device on the same LAN — replace `localhost` with the host's LAN IP.
 
 ## Voice Reference
 
@@ -114,11 +150,13 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 ## Constraints & Notes
 
 - **Lazy init:** First request takes ~10–30s (model download + spaCy model install). Subsequent requests are < 1s.
-- **No auth:** Server has no authentication. Use a reverse proxy (nginx/Caddy) if exposing outside localhost.
+- **No auth:** Server has no authentication. Use a reverse proxy (nginx/Caddy) if exposing outside localhost or the internet.
 - **GPU not wired:** Container intentionally avoids `--gpus` to keep the image small and avoid CUDA dependency. Kokoro is fast enough on CPU.
-- **Single worker:** Uvicorn runs without `--workers` to keep things simple. For high throughput, add `--workers 4` to the Dockerfile CMD and ensure `KPipeline` re-init doesn't become a bottleneck.
+- **Single worker:** Uvicorn runs without `--workers` to keep things simple.
 - **Host port 8001** is used because something else is on 8000.
-- **Model cache persisted** via `~/.cache/huggingface` volume mount — weights survive container rebuilds. First request still downloads (~300 MB), subsequent rebuilds reuse instantly.
+- **Model cache persisted** via `~/.cache/huggingface` volume mount.
+- **Audio output persisted** via `./output` volume mount — files survive container rebuilds and are accessible from the host filesystem.
+- **Audio files are gitignored** (`output/` and `*.wav`).
 
 ## Future Improvements (if needed)
 
@@ -126,4 +164,4 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - [ ] Add support for SSML or phoneme-level control
 - [ ] Expose available voices via a `GET /voices` endpoint
 - [ ] Add streaming (chunked transfer) for long-form TTS
-- [ ] Add a simple web UI (Gradio or custom HTML)
+- [x] Add a simple web UI (Gradio or custom HTML)

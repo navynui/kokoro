@@ -11,7 +11,10 @@ cd ~/dev/kokoro
 docker compose up -d
 ```
 
-Server is live at **`http://localhost:8001`** — open `http://localhost:8001/docs` for the Swagger UI.
+Server is live at **`http://localhost:8001`** — open it in a browser on any device on your LAN for the web UI.
+
+- **Web UI** — `http://localhost:8001/` — generate speech, play inline, browse/download/share files
+- **Swagger UI** — `http://localhost:8001/docs` — interactive API docs
 
 On first request the container downloads the ~300 MB model weights automatically.
 
@@ -43,6 +46,29 @@ Generate speech from text.
 
 Health check — returns `{"status": "ok"}`.
 
+### `GET /`
+
+Web UI — a mobile-friendly page for generating speech, playing audio inline, browsing the file library, and downloading or sharing files.
+
+### `GET /audio/list`
+
+Returns a JSON array of generated WAV files (newest first):
+
+```json
+[
+  {
+    "id": "a1b2c3d4e5f6",
+    "filename": "a1b2c3d4e5f6.wav",
+    "size": 345000,
+    "created": 1745000000.0
+  }
+]
+```
+
+### `GET /audio/{filename}`
+
+Serve a generated WAV file for playback or download.
+
 ## Voices
 
 | ID | Description |
@@ -61,6 +87,12 @@ Many more are available — Kokoro ships with ~150 built-in voices. Browse the f
 
 ## Testing
 
+### Via the web UI
+
+Open `http://localhost:8001/` in any browser (desktop or phone). Type text, pick a voice, and click **Generate**. The audio plays inline and appears in the file list for download or sharing.
+
+### Via curl
+
 ```bash
 curl -X POST "http://localhost:8001/v1/audio/speech" \
   -H "Content-Type: application/json" \
@@ -73,6 +105,12 @@ afplay speech.wav         # macOS
 start speech.wav          # Windows
 ```
 
+### From your phone
+
+1. Find your server's LAN IP: `ip addr show | grep 'inet '` (look for `192.168.x.x` or similar)
+2. Open `http://<LAN_IP>:8001/` on your phone
+3. Generate, play, and share audio directly
+
 ## Configuration
 
 Edit `docker-compose.yml` to change the host port:
@@ -82,15 +120,24 @@ ports:
   - "8001:8000"   # change 8001 to any available port
 ```
 
-### Model Cache (Persistent)
+### Persistent Storage
 
-The HuggingFace model cache at `~/.cache/huggingface` is mounted into the container. The ~300 MB model weights download only once — subsequent rebuilds reuse the cached weights instantly.
+| Mount | Host path | Container path | Purpose |
+|---|---|---|
+| HuggingFace cache | `~/.cache/huggingface` | `/root/.cache/huggingface` | Model weights (~300 MB) survive rebuilds |
+| Audio output | `./output` | `/app/output` | Generated WAV files survive rebuilds, accessible from host |
 
-To clear the cache and force a fresh download:
+To clear the model cache and force a fresh download:
 
 ```bash
 rm -rf ~/.cache/huggingface/hub/hexgrad*
 docker compose down && docker compose up -d
+```
+
+To clear generated audio:
+
+```bash
+rm -f output/*.wav
 ```
 
 ### GPU Acceleration
@@ -104,6 +151,10 @@ If you free up GPU headroom, uncomment the `deploy` block in `docker-compose.yml
 ├── docker-compose.yml   # Service definition, port mapping, volume mounts
 ├── Dockerfile           # Container build (python:3.11-slim)
 ├── server.py            # FastAPI application
+├── static/
+│   └── index.html       # Web UI — TTS form, player, file browser
+├── output/              # Generated WAV files (gitignored)
+├── .gitignore
 ├── README.md            # This file
 └── AGENTS.md            # AI assistant context
 ```

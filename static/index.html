@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kokoro TTS</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0f172a; color: #e2e8f0; line-height: 1.6; padding: 1rem;
+  }
+  .container { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.25rem; }
+  .sub { color: #94a3b8; font-size: 0.875rem; margin-bottom: 1.5rem; }
+
+  .card { background: #1e293b; border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; }
+
+  label { display: block; font-size: 0.875rem; font-weight: 600; margin-bottom: 0.35rem; color: #cbd5e1; }
+  textarea, select, input[type="range"] { width: 100%; }
+  textarea {
+    background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px;
+    padding: 0.75rem; font-size: 0.95rem; resize: vertical; min-height: 80px;
+  }
+  textarea:focus { outline: none; border-color: #6366f1; }
+
+  .form-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.75rem; }
+  .form-row > * { flex: 1; min-width: 140px; }
+
+  select {
+    background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px;
+    padding: 0.6rem; font-size: 0.9rem; cursor: pointer;
+  }
+
+  .speed-group { display: flex; align-items: center; gap: 0.5rem; }
+  .speed-group input[type="range"] { flex: 1; accent-color: #6366f1; }
+  .speed-group span { min-width: 2.5rem; text-align: center; font-size: 0.9rem; color: #94a3b8; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+    padding: 0.65rem 1.4rem; border: none; border-radius: 8px; font-size: 0.95rem;
+    font-weight: 600; cursor: pointer; transition: background 0.15s;
+  }
+  .btn-primary { background: #6366f1; color: #fff; }
+  .btn-primary:hover { background: #4f46e5; }
+  .btn-primary:disabled { background: #475569; cursor: not-allowed; }
+  .btn-sm { padding: 0.4rem 0.75rem; font-size: 0.8rem; border-radius: 6px; }
+  .btn-ghost { background: transparent; color: #94a3b8; border: 1px solid #334155; }
+  .btn-ghost:hover { background: #334155; color: #e2e8f0; }
+  .btn-success { background: #22c55e; color: #fff; }
+  .btn-success:hover { background: #16a34a; }
+
+  .generate-row { display: flex; gap: 0.75rem; align-items: flex-end; margin-top: 1rem; }
+  .generate-row .btn { flex-shrink: 0; }
+
+  #player-wrapper { display: none; margin-top: 1rem; }
+  #player-wrapper.show { display: block; }
+  #player-wrapper audio { width: 100%; }
+
+  .file-list { list-style: none; }
+  .file-list li {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.6rem 0; border-bottom: 1px solid #1e293b;
+  }
+  .file-list li:last-child { border-bottom: none; }
+  .file-info { flex: 1; min-width: 0; }
+  .file-info .name { font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .file-info .meta { font-size: 0.75rem; color: #64748b; }
+  .file-actions { display: flex; gap: 0.35rem; flex-shrink: 0; }
+  .file-actions .btn { font-size: 0.75rem; padding: 0.35rem 0.6rem; }
+
+  .empty { text-align: center; padding: 2rem 0; color: #64748b; font-size: 0.9rem; }
+  .toast {
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
+    background: #1e293b; color: #e2e8f0; padding: 0.6rem 1.2rem; border-radius: 8px;
+    font-size: 0.85rem; box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 100;
+  }
+  .toast.show { opacity: 1; }
+
+  .spinner {
+    display: inline-block; width: 1rem; height: 1rem; border: 2px solid #6366f1;
+    border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 480px) {
+    .form-row > * { min-width: 100%; }
+    .generate-row { flex-direction: column; }
+    .file-list li { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🔊 Kokoro TTS</h1>
+  <p class="sub">Generate speech and browse files from any device</p>
+
+  <div class="card">
+    <label for="text">Text</label>
+    <textarea id="text" placeholder="Type or paste text to synthesise…"></textarea>
+
+    <div class="form-row">
+      <div>
+        <label for="voice">Voice</label>
+        <select id="voice"></select>
+      </div>
+      <div>
+        <label for="speed">Speed</label>
+        <div class="speed-group">
+          <input type="range" id="speed" min="0.5" max="2.0" step="0.1" value="1.0">
+          <span id="speed-label">1.0×</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="generate-row">
+      <button class="btn btn-primary" id="generate-btn">✨ Generate</button>
+      <span id="status" style="font-size:0.85rem;color:#94a3b8;"></span>
+    </div>
+
+    <div id="player-wrapper">
+      <audio id="player" controls></audio>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
+      <h2 style="font-size:1rem;font-weight:600;">Generated Files</h2>
+      <button class="btn btn-sm btn-ghost" id="refresh-btn">⟳ Refresh</button>
+    </div>
+    <ul class="file-list" id="file-list">
+      <li class="empty">No files yet. Generate something!</li>
+    </ul>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── voice list ──────────────────────────────────────────────────────────
+const VOICES = [
+  "af_heart","af_bella","af_nicole","af_sarah","af_sky",
+  "am_adam","am_michael","am_fenrir","am_puck",
+  "af_alloy","af_aoede","af_bee","af_beau","af_chiptune",
+  "af_claude","af_cozy","af_doodle","af_emma","af_jadore",
+  "af_jessica","af_joke","af_liam","af_macy","af_moon",
+  "af_musical","af_nova","af_pearl","af_queen","af_read",
+  "af_rose","af_santa","af_star","af_sticks","af_swagger",
+  "af_tigress","af_vex","am_ago","am_arrow","am_axe",
+  "am_baritone","am_bellamy","am_butters","am_c dignified",
+  "am_chronos","am_coffee","am_dallas","am_dave","am_diary",
+  "am_ethan","am_fierce","am_grit","am_hal","am_jace",
+  "am_jinx","am_leo","am_loki","am_manifest","am_mark",
+  "am_marsh","am_morris","am_nexus","am_nyx","am_onxy",
+  "am_owen","am_paulo","am_phil","am_pm","am_rada",
+  "am_ramses","am_robo","am_santino","am_satan","am_seraph",
+  "am_silver","am_sk","am_sleep","am_smooth","am_snow",
+  "am_sun","am_tango","am_team","am_tempest","am_thor",
+  "am_toad","am_wolf","am_zach","am_zoe",
+];
+
+const voiceSelect = document.getElementById('voice');
+VOICES.forEach(v => {
+  const opt = document.createElement('option');
+  opt.value = v;
+  opt.textContent = v;
+  voiceSelect.appendChild(opt);
+});
+voiceSelect.value = 'af_bella';
+
+// ── speed slider ────────────────────────────────────────────────────────
+const speedInput = document.getElementById('speed');
+const speedLabel = document.getElementById('speed-label');
+speedInput.addEventListener('input', () => {
+  speedLabel.textContent = parseFloat(speedInput.value).toFixed(1) + '×';
+});
+
+// ── toast helper ────────────────────────────────────────────────────────
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+// ── format bytes ────────────────────────────────────────────────────────
+function fmtSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1024/1024).toFixed(1) + ' MB';
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleString();
+}
+
+// ── file list ───────────────────────────────────────────────────────────
+async function loadFileList() {
+  const list = document.getElementById('file-list');
+  try {
+    const res = await fetch('/audio/list');
+    if (!res.ok) throw new Error('Failed to load');
+    const files = await res.json();
+
+    if (files.length === 0) {
+      list.innerHTML = '<li class="empty">No files yet. Generate something!</li>';
+      return;
+    }
+
+    list.innerHTML = files.map(f => {
+      const url = `${window.location.origin}/audio/${f.filename}`;
+      return `<li>
+        <div class="file-info">
+          <div class="name" title="${f.filename}">${f.filename}</div>
+          <div class="meta">${fmtSize(f.size)} — ${fmtTime(f.created)}</div>
+        </div>
+        <div class="file-actions">
+          <button class="btn btn-sm btn-ghost" onclick="playFile('${f.filename}')" title="Play">▶</button>
+          <button class="btn btn-sm btn-ghost" onclick="downloadFile('${f.filename}')" title="Download">⬇</button>
+          <button class="btn btn-sm btn-ghost" onclick="copyLink('${url}')" title="Copy link">🔗</button>
+          <button class="btn btn-sm btn-ghost" onclick="shareFile('${url}','${f.filename}')" title="Share">📤</button>
+        </div>
+      </li>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<li class="empty">Error loading files.</li>';
+  }
+}
+
+function playFile(filename) {
+  const player = document.getElementById('player');
+  const wrapper = document.getElementById('player-wrapper');
+  player.src = `/audio/${filename}`;
+  wrapper.classList.add('show');
+  player.play().catch(() => {});
+}
+
+function downloadFile(filename) {
+  const a = document.createElement('a');
+  a.href = `/audio/${filename}`;
+  a.download = filename;
+  a.click();
+}
+
+function copyLink(url) {
+  navigator.clipboard.writeText(url).then(() => toast('Link copied!')).catch(() => {
+    // fallback
+    const ta = document.createElement('textarea');
+    ta.value = url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    toast('Link copied!');
+  });
+}
+
+function shareFile(url, name) {
+  if (navigator.share) {
+    navigator.share({ title: name, url }).catch(() => {});
+  } else {
+    copyLink(url);
+  }
+}
+
+// ── generate ────────────────────────────────────────────────────────────
+async function generate() {
+  const text = document.getElementById('text').value.trim();
+  if (!text) { toast('Please enter some text.'); return; }
+
+  const voice = document.getElementById('voice').value;
+  const speed = parseFloat(document.getElementById('speed').value);
+  const btn = document.getElementById('generate-btn');
+  const status = document.getElementById('status');
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Generating…';
+  status.textContent = '';
+
+  try {
+    const res = await fetch('/v1/audio/speech', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice, speed }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || 'Generation failed');
+    }
+
+    // Play the returned audio blob immediately
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const player = document.getElementById('player');
+    const wrapper = document.getElementById('player-wrapper');
+    player.src = url;
+    wrapper.classList.add('show');
+    player.play().catch(() => {});
+
+    status.textContent = '✅ Done';
+    toast('Audio generated!');
+
+    // Refresh file list — the new file will appear at top
+    setTimeout(loadFileList, 500);
+
+  } catch (e) {
+    status.textContent = '❌ ' + e.message;
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '✨ Generate';
+  }
+}
+
+// ── wire it up ──────────────────────────────────────────────────────────
+document.getElementById('generate-btn').addEventListener('click', generate);
+document.getElementById('refresh-btn').addEventListener('click', loadFileList);
+
+// Allow Ctrl+Enter / Cmd+Enter to submit
+document.getElementById('text').addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') generate();
+});
+
+// Initial load
+loadFileList();
+</script>
+</body>
+</html>
