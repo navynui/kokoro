@@ -61,9 +61,13 @@ curl -X POST "http://localhost:8001/v1/audio/speech" \
 
 Returns `{"status": "ok"}`.
 
-### `GET /audio/list`
+### `GET /`
 
-Returns a JSON array of generated WAV files, newest first:
+Serves the web UI (`static/index.html`). The UI shows **all** media (audio + video) in one unified file browser with inline play/download/share.
+
+### `GET /media/list`
+
+Returns all recognised media files (audio + video), newest first:
 
 ```json
 [
@@ -71,18 +75,32 @@ Returns a JSON array of generated WAV files, newest first:
     "id": "a1b2c3d4e5f6",
     "filename": "a1b2c3d4e5f6.wav",
     "size": 345000,
-    "created": 1745000000.0
+    "created": 1745000000.0,
+    "type": "audio",
+    "mime": "audio/wav"
+  },
+  {
+    "id": "video123",
+    "filename": "output.mp4",
+    "size": 2048000,
+    "created": 1745000100.0,
+    "type": "video",
+    "mime": "video/mp4"
   }
 ]
 ```
 
+Supported: `wav`, `mp3`, `ogg`, `m4a`, `flac`, `mp4`, `webm`, `mov`, `mkv`.
+
+### `GET /audio/list`
+
+Backward-compatible — returns only `.wav` files.
+
+### `GET /media/{filename}`
+
 ### `GET /audio/{filename}`
 
-Serves a WAV file for playback or download.
-
-### `GET /`
-
-Serves the web UI (`static/index.html`).
+Serve any media file with correct MIME type for playback or download.
 
 ## Voice Reference
 
@@ -150,15 +168,15 @@ def tts(text, voice="af_bella", speed=1.0, output_path="speech.wav"):
     return output_path, filename
 ```
 
-### 5. Get the public URL of a generated file
+### 5. Get the public URL of the newest file
 
 ```python
 import requests
 
-files = requests.get("http://localhost:8001/audio/list").json()
+files = requests.get("http://localhost:8001/media/list").json()
 if files:
     newest = files[0]["filename"]
-    url = f"http://localhost:8001/audio/{newest}"
+    url = f"http://localhost:8001/media/{newest}"
     # Use this URL in a HyperFrames composition or share link
 ```
 

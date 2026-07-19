@@ -47,15 +47,13 @@
   .btn-sm { padding: 0.4rem 0.75rem; font-size: 0.8rem; border-radius: 6px; }
   .btn-ghost { background: transparent; color: #94a3b8; border: 1px solid #334155; }
   .btn-ghost:hover { background: #334155; color: #e2e8f0; }
-  .btn-success { background: #22c55e; color: #fff; }
-  .btn-success:hover { background: #16a34a; }
 
   .generate-row { display: flex; gap: 0.75rem; align-items: flex-end; margin-top: 1rem; }
   .generate-row .btn { flex-shrink: 0; }
 
   #player-wrapper { display: none; margin-top: 1rem; }
   #player-wrapper.show { display: block; }
-  #player-wrapper audio { width: 100%; }
+  #player-wrapper video, #player-wrapper audio { width: 100%; border-radius: 8px; }
 
   .file-list { list-style: none; }
   .file-list li {
@@ -65,6 +63,12 @@
   .file-list li:last-child { border-bottom: none; }
   .file-info { flex: 1; min-width: 0; }
   .file-info .name { font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .file-info .name .badge {
+    display: inline-block; font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+    padding: 0.1rem 0.35rem; border-radius: 4px; margin-right: 0.4rem; vertical-align: middle;
+  }
+  .badge-audio { background: #6366f1; color: #fff; }
+  .badge-video { background: #f59e0b; color: #000; }
   .file-info .meta { font-size: 0.75rem; color: #64748b; }
   .file-actions { display: flex; gap: 0.35rem; flex-shrink: 0; }
   .file-actions .btn { font-size: 0.75rem; padding: 0.35rem 0.6rem; }
@@ -94,7 +98,7 @@
 <body>
 <div class="container">
   <h1>🔊 Kokoro TTS</h1>
-  <p class="sub">Generate speech and browse files from any device</p>
+  <p class="sub">Generate speech and browse media files from any device</p>
 
   <div class="card">
     <label for="text">Text</label>
@@ -120,13 +124,14 @@
     </div>
 
     <div id="player-wrapper">
-      <audio id="player" controls></audio>
+      <video id="player-video" controls style="display:none"></video>
+      <audio id="player-audio" controls style="display:none"></audio>
     </div>
   </div>
 
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
-      <h2 style="font-size:1rem;font-weight:600;">Generated Files</h2>
+      <h2 style="font-size:1rem;font-weight:600;">Media Files</h2>
       <button class="btn btn-sm btn-ghost" id="refresh-btn">⟳ Refresh</button>
     </div>
     <ul class="file-list" id="file-list">
@@ -198,11 +203,36 @@ function fmtTime(ts) {
   return d.toLocaleString();
 }
 
+// ── show the right player (audio vs video) ──────────────────────────────
+function showPlayer(url, type) {
+  const wrapper = document.getElementById('player-wrapper');
+  const vid = document.getElementById('player-video');
+  const aud = document.getElementById('player-audio');
+
+  // Hide both, reset src
+  vid.style.display = 'none';
+  aud.style.display = 'none';
+  vid.src = '';
+  aud.src = '';
+
+  if (type === 'video') {
+    vid.src = url;
+    vid.style.display = 'block';
+    wrapper.classList.add('show');
+    vid.play().catch(() => {});
+  } else {
+    aud.src = url;
+    aud.style.display = 'block';
+    wrapper.classList.add('show');
+    aud.play().catch(() => {});
+  }
+}
+
 // ── file list ───────────────────────────────────────────────────────────
 async function loadFileList() {
   const list = document.getElementById('file-list');
   try {
-    const res = await fetch('/audio/list');
+    const res = await fetch('/media/list');
     if (!res.ok) throw new Error('Failed to load');
     const files = await res.json();
 
@@ -212,14 +242,17 @@ async function loadFileList() {
     }
 
     list.innerHTML = files.map(f => {
-      const url = `${window.location.origin}/audio/${f.filename}`;
+      const url = `${window.location.origin}/media/${f.filename}`;
+      const badge = f.type === 'video'
+        ? '<span class="badge badge-video">🎬</span>'
+        : '<span class="badge badge-audio">♪</span>';
       return `<li>
         <div class="file-info">
-          <div class="name" title="${f.filename}">${f.filename}</div>
+          <div class="name" title="${f.filename}">${badge}${f.filename}</div>
           <div class="meta">${fmtSize(f.size)} — ${fmtTime(f.created)}</div>
         </div>
         <div class="file-actions">
-          <button class="btn btn-sm btn-ghost" onclick="playFile('${f.filename}')" title="Play">▶</button>
+          <button class="btn btn-sm btn-ghost" onclick="playFile('${f.filename}','${f.type}')" title="Play">▶</button>
           <button class="btn btn-sm btn-ghost" onclick="downloadFile('${f.filename}')" title="Download">⬇</button>
           <button class="btn btn-sm btn-ghost" onclick="copyLink('${url}')" title="Copy link">🔗</button>
           <button class="btn btn-sm btn-ghost" onclick="shareFile('${url}','${f.filename}')" title="Share">📤</button>
@@ -231,24 +264,19 @@ async function loadFileList() {
   }
 }
 
-function playFile(filename) {
-  const player = document.getElementById('player');
-  const wrapper = document.getElementById('player-wrapper');
-  player.src = `/audio/${filename}`;
-  wrapper.classList.add('show');
-  player.play().catch(() => {});
+function playFile(filename, type) {
+  showPlayer(`/media/${filename}`, type);
 }
 
 function downloadFile(filename) {
   const a = document.createElement('a');
-  a.href = `/audio/${filename}`;
+  a.href = `/media/${filename}`;
   a.download = filename;
   a.click();
 }
 
 function copyLink(url) {
   navigator.clipboard.writeText(url).then(() => toast('Link copied!')).catch(() => {
-    // fallback
     const ta = document.createElement('textarea');
     ta.value = url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
     toast('Link copied!');
@@ -292,11 +320,7 @@ async function generate() {
     // Play the returned audio blob immediately
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
-    const player = document.getElementById('player');
-    const wrapper = document.getElementById('player-wrapper');
-    player.src = url;
-    wrapper.classList.add('show');
-    player.play().catch(() => {});
+    showPlayer(url, 'audio');
 
     status.textContent = '✅ Done';
     toast('Audio generated!');

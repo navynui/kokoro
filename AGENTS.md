@@ -21,20 +21,22 @@
 ## Architecture
 
 ```
-Browser ──GET /─────────────────> FastAPI ──> index.html (web UI)
-Browser ──GET /audio/list───────> FastAPI ──> JSON file list
-Browser ──GET /audio/{file}─────> FastAPI ──> WAV download
-Browser ──POST /v1/audio/speech─> FastAPI ──> KPipeline ──> WAV response
-             {"text","voice","speed"}         │
-                                          Downloads model
-                                          on first call
-                                          (~300 MB from HF)
+Browser ──GET /────────────────────> FastAPI ──> index.html (web UI)
+Browser ──GET /media/list──────────> FastAPI ──> JSON file list (audio + video)
+Browser ──GET /media/{file}────────> FastAPI ──> media file (correct MIME)
+Browser ──POST /v1/audio/speech────> FastAPI ──> KPipeline ──> WAV response
+             {"text","voice","speed"}           │
+                                              Downloads model
+                                              on first call
+                                              (~300 MB from HF)
 ```
 
 - `KPipeline` is initialised once (singleton) and reused across requests.
-- Pipeline uses `lang_code='a'` (American English).
+- Pipeline uses `lang_code='a' (American English).
 - Audio output: 24 kHz, 16-bit mono WAV.
 - Generated files written to `/app/output/` (mounted to `./output/` on host).
+- `/media/list` detects `.wav`, `.mp3`, `.ogg`, `.m4a`, `.flac`, `.mp4`, `.webm`, `.mov`, `.mkv`.
+- `/audio/list` is kept for backward compat (`.wav` only).
 
 ## API Contract
 
@@ -64,7 +66,7 @@ Headers (response):
 Response: 200 audio/wav (binary) | 500 {"detail": "..."}
 ```
 
-### `GET /audio/list`
+### `GET /media/list`
 
 ```
 Response: 200
@@ -73,16 +75,28 @@ Response: 200
     "id": "a1b2c3d4e5f6",
     "filename": "a1b2c3d4e5f6.wav",
     "size": 345000,
-    "created": 1745000000.0
+    "created": 1745000000.0,
+    "type": "audio",
+    "mime": "audio/wav"
   }
 ]
 ```
 
-Sorted newest-first by modification time.
+Supported: `wav`, `mp3`, `ogg`, `m4a`, `flac`, `mp4`, `webm`, `mov`, `mkv`. Sorted newest-first.
+
+### `GET /audio/list`
+
+Backward-compatible — same format, `.wav` only.
+
+### `GET /media/{filename}`
 
 ### `GET /audio/{filename}`
 
-Serves the WAV file for playback or download. Rejects path traversal.
+Serves any recognised media file with correct MIME type. Rejects path traversal.
+
+### `GET /`
+
+Serves the web UI (`static/index.html`). The UI renders audio files with `<audio>` and video files with `<video>`.
 
 ## Dependency Graph (pip)
 

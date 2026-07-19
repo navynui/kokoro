@@ -48,11 +48,11 @@ Health check — returns `{"status": "ok"}`.
 
 ### `GET /`
 
-Web UI — a mobile-friendly page for generating speech, playing audio inline, browsing the file library, and downloading or sharing files.
+Web UI — a mobile-friendly page for generating speech, playing audio/video inline, browsing the media library, and downloading or sharing files.
 
-### `GET /audio/list`
+### `GET /media/list`
 
-Returns a JSON array of generated WAV files (newest first):
+Returns a JSON array of all generated media files (audio + video), newest first:
 
 ```json
 [
@@ -60,14 +60,32 @@ Returns a JSON array of generated WAV files (newest first):
     "id": "a1b2c3d4e5f6",
     "filename": "a1b2c3d4e5f6.wav",
     "size": 345000,
-    "created": 1745000000.0
+    "created": 1745000000.0,
+    "type": "audio",
+    "mime": "audio/wav"
+  },
+  {
+    "id": "video123",
+    "filename": "output.mp4",
+    "size": 2048000,
+    "created": 1745000100.0,
+    "type": "video",
+    "mime": "video/mp4"
   }
 ]
 ```
 
+Supported formats: `wav`, `mp3`, `ogg`, `m4a`, `flac` (audio) and `mp4`, `webm`, `mov`, `mkv` (video).
+
+### `GET /audio/list`
+
+Backward-compatible — returns only `.wav` files (same format as above, without `type`/`mime` fields).
+
+### `GET /media/{filename}`
+
 ### `GET /audio/{filename}`
 
-Serve a generated WAV file for playback or download.
+Serve any media file with the correct MIME type for playback or download.
 
 ## Voices
 
