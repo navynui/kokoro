@@ -5,6 +5,8 @@ services:
     ports:
       - "8001:8000"
     restart: unless-stopped
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
     # Uncomment the next two lines if you free up GPU headroom later:
     # deploy:
     #   resources:

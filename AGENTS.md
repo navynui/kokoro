@@ -12,7 +12,7 @@
 
 | File | Role |
 |---|---|
-| `docker-compose.yml` | Single service `tts`, maps host `8001` → container `8000`. No GPU passthrough. |
+| `docker-compose.yml` | Single service `tts`, maps host `8001` → container `8000`. Mounts `~/.cache/huggingface` for model persistence. No GPU passthrough. |
 | `Dockerfile` | `python:3.11-slim` base. Pins `kokoro>=0.9.2`, `fastapi>=0.115.0`, `uvicorn[standard]>=0.34.0`, `soundfile`, `numpy`. |
 | `server.py` | FastAPI app. Lazy-init `KPipeline` (model downloads on first request). |
 
@@ -118,11 +118,11 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - **GPU not wired:** Container intentionally avoids `--gpus` to keep the image small and avoid CUDA dependency. Kokoro is fast enough on CPU.
 - **Single worker:** Uvicorn runs without `--workers` to keep things simple. For high throughput, add `--workers 4` to the Dockerfile CMD and ensure `KPipeline` re-init doesn't become a bottleneck.
 - **Host port 8001** is used because something else is on 8000.
-- **No volume mount** for model cache — model redownloads if container is rebuilt. To persist, mount `~/.cache/huggingface` into the container.
+- **Model cache persisted** via `~/.cache/huggingface` volume mount — weights survive container rebuilds. First request still downloads (~300 MB), subsequent rebuilds reuse instantly.
 
 ## Future Improvements (if needed)
 
-- [ ] Mount HuggingFace cache volume to avoid re-downloading weights
+- [x] Mount HuggingFace cache volume to avoid re-downloading weights
 - [ ] Add support for SSML or phoneme-level control
 - [ ] Expose available voices via a `GET /voices` endpoint
 - [ ] Add streaming (chunked transfer) for long-form TTS

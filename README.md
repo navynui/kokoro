@@ -82,6 +82,17 @@ ports:
   - "8001:8000"   # change 8001 to any available port
 ```
 
+### Model Cache (Persistent)
+
+The HuggingFace model cache at `~/.cache/huggingface` is mounted into the container. The ~300 MB model weights download only once — subsequent rebuilds reuse the cached weights instantly.
+
+To clear the cache and force a fresh download:
+
+```bash
+rm -rf ~/.cache/huggingface/hub/hexgrad*
+docker compose down && docker compose up -d
+```
+
 ### GPU Acceleration
 
 If you free up GPU headroom, uncomment the `deploy` block in `docker-compose.yml` to use the NVIDIA GPU. Kokoro will automatically pick it up — no code changes needed.
@@ -90,7 +101,7 @@ If you free up GPU headroom, uncomment the `deploy` block in `docker-compose.yml
 
 ```
 ~/dev/kokoro/
-├── docker-compose.yml   # Service definition, port mapping
+├── docker-compose.yml   # Service definition, port mapping, volume mounts
 ├── Dockerfile           # Container build (python:3.11-slim)
 ├── server.py            # FastAPI application
 ├── README.md            # This file
