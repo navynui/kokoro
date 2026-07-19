@@ -1,0 +1,15 @@
+services:
+  tts:
+    build: .
+    container_name: kokoro-tts
+    ports:
+      - "8001:8000"
+    restart: unless-stopped
+    # Uncomment the next two lines if you free up GPU headroom later:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
