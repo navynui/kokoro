@@ -156,7 +156,8 @@ If you free up GPU headroom, uncomment the `deploy` block in `docker-compose.yml
 ├── output/              # Generated WAV files (gitignored)
 ├── .gitignore
 ├── README.md            # This file
-└── AGENTS.md            # AI assistant context
+├── AGENTS.md            # AI assistant context
+└── SKILL.md             # Agent skill document — how to use this server
 ```
 
 ## Stop the Server
