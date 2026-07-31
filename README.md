@@ -223,11 +223,11 @@ rm -f output/*.wav
 
 ### GPU Acceleration
 
-This server runs Kokoro on the host's **NVIDIA GTX 1060 (6 GB)** when available, and falls back to CPU automatically if the GPU is missing or short on VRAM.
+GPU engines (Kokoro, Thai MMS, Thai Thonburian/F5) run on the **fastest available GPU**: the host's **Tesla P100 (16 GB)** first, falling back to the **GTX 1060 (6 GB)**, then CPU if neither is usable. Verified: cached F5 synthesis ~2.2s on P100 vs ~4.4s on 1060.
 
 **How it's configured:**
 
-- `docker-compose.yml` pins the GTX 1060 by UUID via a Docker device reservation:
+- `docker-compose.yml` exposes both GPUs via a Docker device reservation (P100 listed first so it maps to cuda:0):
 
   ```yaml
   deploy:
@@ -236,23 +236,25 @@ This server runs Kokoro on the host's **NVIDIA GTX 1060 (6 GB)** when available,
         devices:
           - driver: nvidia
             device_ids:
+              - GPU-37d0153e-32ad-2825-9300-de8903297fd1  # Tesla P100 (preferred)
               - GPU-ebd852dc-b885-2874-feb2-1b37c939588b  # GTX 1060
             capabilities: [gpu]
   ```
 
-  To target a different GPU, replace the UUID (find yours with `nvidia-smi --query-gpu=index,name,uuid --format=csv`). Only the pinned GPU is exposed to the container.
+  To target different GPUs, replace the UUIDs (find yours with `nvidia-smi --query-gpu=index,name,uuid --format=csv`). Only the listed GPUs are exposed to the container.
 
-- `Dockerfile` pins `torch==2.7.1+cu126` from the [PyTorch index](https://download.pytorch.org/whl/cu126). Newer PyPI torch builds (cu13x) dropped kernels for Pascal (sm_61), which the GTX 1060 requires.
+- `Dockerfile` pins `torch==2.7.1+cu126` from the [PyTorch index](https://download.pytorch.org/whl/cu126). Newer PyPI torch builds (cu13x) dropped kernels for Pascal (sm_60/61), which both the P100 and GTX 1060 require.
 
 **Host requirements:** NVIDIA driver plus the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (`nvidia-smi` must work on the host).
 
-**Automatic CPU fallback:** `server.py` selects the device at startup and guards against VRAM exhaustion:
+**Automatic fallback:** `server.py`'s `_pick_device()` selects the best device at engine init:
 
-1. **Low VRAM at startup** — if less than **1.5 GiB** is free, the model loads on CPU (`MIN_FREE_VRAM` in `server.py`).
-2. **Init failure** — if CUDA model loading fails (e.g., OOM while loading weights), it retries on CPU.
-3. **Mid-generation OOM** — if a request runs out of VRAM during synthesis, the server rebuilds the pipeline on CPU and retries that request; subsequent requests stay on CPU to avoid thrashing between devices.
+1. **Prefer Tesla P100** (fastest), then GTX 1060, then CPU.
+2. **Skip GPUs with < 1.5 GiB free VRAM** (`MIN_FREE_VRAM` in `server.py`).
+3. **Init failure** — if CUDA model loading fails (e.g., OOM while loading weights), it retries on CPU.
+4. **Mid-generation OOM (Kokoro)** — the server rebuilds the pipeline on CPU and retries that request once; subsequent requests stay on CPU to avoid thrashing.
 
-Kokoro-82M itself needs only ~1 GiB VRAM, so GPU OOM is unlikely unless other processes are using the card.
+Kokoro and MMS need ~1 GB VRAM; F5 needs ~1.7 GB, so OOM is unlikely unless other processes are using the cards.
 
 ## Project Structure
 

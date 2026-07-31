@@ -16,8 +16,9 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              # Pin the GTX 1060 (host GPU index 1). Other GPUs on this host
-              # (e.g. Tesla P100) stay untouched.
+              # Both GPUs exposed; P100 listed first so it maps to cuda:0.
+              # server.py prefers it (fastest), then the GTX 1060, then CPU.
               device_ids:
-                - GPU-ebd852dc-b885-2874-feb2-1b37c939588b
+                - GPU-37d0153e-32ad-2825-9300-de8903297fd1  # Tesla P100 (preferred)
+                - GPU-ebd852dc-b885-2874-feb2-1b37c939588b  # GTX 1060
               capabilities: [gpu]

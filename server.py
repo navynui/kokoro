@@ -24,17 +24,19 @@ MIN_FREE_VRAM = 1.5 * 1024 ** 3  # 1.5 GiB
 
 
 def _pick_device() -> str:
-    """Pick cuda only when a GPU is present with enough free VRAM."""
+    """Pick the fastest usable GPU (Tesla P100 → GTX 1060), else CPU."""
     if not torch.cuda.is_available():
         return 'cpu'
-    free, _total = torch.cuda.mem_get_info()
-    if free < MIN_FREE_VRAM:
-        print(
-            f"[server] Only {free / 1024**3:.2f} GiB VRAM free on "
-            f"{torch.cuda.get_device_name(0)}; using CPU instead"
-        )
-        return 'cpu'
-    return 'cuda'
+    names = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+    # Prefer Tesla P100 (fastest), then any other NVIDIA GPU, then CPU
+    order = sorted(range(len(names)), key=lambda i: (0 if 'P100' in names[i] else 1, i))
+    for i in order:
+        free, _total = torch.cuda.mem_get_info(i)
+        if free >= MIN_FREE_VRAM:
+            print(f"[server] Using {names[i]} (cuda:{i}) — {free / 1024**3:.2f} GiB free")
+            return f'cuda:{i}'
+    print("[server] No GPU with enough free VRAM; using CPU")
+    return 'cpu'
 
 
 def _build_pipeline(device: str) -> KPipeline:
@@ -196,7 +198,7 @@ def get_mms():
         with _mms_lock:
             if _mms is None:
                 from transformers import VitsModel, AutoTokenizer
-                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                device = _pick_device()
                 print(f"[server] Initializing MMS-TTS (mms-tts-tha) on {device}…")
                 _mms = {
                     "model": VitsModel.from_pretrained("facebook/mms-tts-tha").to(device),
@@ -228,7 +230,7 @@ def get_f5():
         with _f5_lock:
             if _f5 is None:
                 from flowtts.inference import FlowTTSPipeline, ModelConfig, AudioConfig
-                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                device = _pick_device()
                 F5_DIR.mkdir(parents=True, exist_ok=True)
                 ckpt = F5_DIR / "mega_f5_last.safetensors"
                 vocab = F5_DIR / "mega_vocab.txt"
