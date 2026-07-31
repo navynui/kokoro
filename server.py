@@ -324,6 +324,7 @@ def get_f5():
                     checkpoint=str(ckpt),
                     vocab_file=str(vocab),
                     device=device,
+                    seed=0,  # fixed seed -> reproducible voice cloning (was random)
                 )
                 pipeline = FlowTTSPipeline(
                     model_config=model_config,
@@ -361,6 +362,7 @@ def get_jaitts():
                     checkpoint=str(ckpt),
                     vocab_file=str(vocab),
                     device=device,
+                    seed=0,  # fixed seed -> reproducible voice cloning (was random)
                 )
                 pipeline = FlowTTSPipeline(
                     model_config=model_config,
@@ -416,6 +418,7 @@ def _list_ref_voices() -> list[dict]:
             "name": name,
             "language": "Thai (voice clone)",
             "text": m.get("text", ""),
+            "pace": m.get("pace", 1.0),
             "source": m.get("source", ""),
             "created": m.get("created", 0),
             "duration": m.get("duration", 0),
@@ -423,17 +426,19 @@ def _list_ref_voices() -> list[dict]:
     return out
 
 
-def _get_ref_voice(name: str) -> Optional[tuple[str, str]]:
-    """Return (wav_path, ref_text) for a registered voice, or None."""
+def _get_ref_voice(name: str) -> Optional[tuple[str, str, float]]:
+    """Return (wav_path, ref_text, pace) for a registered voice, or None."""
     wav = _ref_wav_path(name)
     meta = _ref_meta_path(name)
     if not wav.exists() or not meta.exists():
         return None
     try:
-        text = json.loads(meta.read_text(encoding="utf-8")).get("text", "")
+        m = json.loads(meta.read_text(encoding="utf-8"))
+        text = m.get("text", "")
+        pace = float(m.get("pace", 1.0))
     except Exception:
         return None
-    return str(wav), text
+    return str(wav), text, pace
 
 
 def _clone_voices() -> list[dict]:
@@ -444,8 +449,11 @@ def _clone_voices() -> list[dict]:
     ]
 
 
-def _resolve_ref_voice(engine: dict, request: "TTSRequest") -> tuple[str, str]:
+def _resolve_ref_voice(engine: dict, request: "TTSRequest") -> tuple[str, str, float]:
     """Resolve a reference voice for F5-family engines.
+
+    Returns (ref_wav_path, ref_text, pace). pace > 1 slows the voice
+    (duration stretch); the engine applies it as speed/pace.
 
     Priority:
       1. request.ref (Option C) — a file in ./output or ./ref_voices
@@ -461,14 +469,14 @@ def _resolve_ref_voice(engine: dict, request: "TTSRequest") -> tuple[str, str]:
         for base in (OUTPUT_DIR, REF_VOICES_DIR):
             p = base / name
             if p.exists() and p.is_file():
-                return str(p), request.ref_text.strip()
+                return str(p), request.ref_text.strip(), 1.0
         raise HTTPException(status_code=404, detail=f"ref file not found: {name}")
     if request.voice and request.voice != "default":
         found = _get_ref_voice(request.voice)
         if found is None:
             raise HTTPException(status_code=404, detail=f"Unknown voice: {request.voice}")
         return found
-    return engine["ref"], engine["ref_text"]
+    return engine["ref"], engine["ref_text"], 1.0
 
 # Media types we recognise
 MEDIA_EXTENSIONS = {
@@ -598,15 +606,17 @@ async def list_voices(engine: str = "kokoro"):
 async def add_ref_voice(
     name: str = Form(""),
     text: str = Form(""),
+    pace: float = Form(1.0),
     audio: UploadFile = File(...),
 ):
     """Register a reference voice for cloning (f5/jaitts engines).
 
     Multipart form: name (slug), text (required transcript of the clip),
-    audio (any format pydub/ffmpeg can decode). Stored as 24 kHz mono WAV
-    with leading/trailing silence trimmed.
+    pace (speech-speed compensation; > 1 = slower/more natural, default 1.0),
+    audio (any format pydub/ffmpeg can decode). Stored as a 24 kHz mono WAV,
+    silence-trimmed and clipped to <= 12s so inference conditioning is stable.
     """
-    from pydub import AudioSegment
+    from pydub import AudioSegment, silence
 
     safe = _safe_ref_name(name)
     transcript = text.strip()
@@ -614,6 +624,8 @@ async def add_ref_voice(
         raise HTTPException(status_code=400, detail="ref_text (text) is required")
     if len(transcript) > 1000:
         raise HTTPException(status_code=400, detail="ref_text too long (max 1000 chars)")
+    if not 0.2 <= pace <= 5.0:
+        raise HTTPException(status_code=400, detail="pace must be between 0.2 and 5.0")
 
     data = await audio.read()
     if len(data) > MAX_REF_AUDIO_MB * 1024 * 1024:
@@ -635,16 +647,27 @@ async def add_ref_voice(
     except Exception:
         pass
 
+    # Clip to <=12s: flowtts clips refs to 12s at inference anyway; doing it here
+    # (longest silence-delimited segment) keeps conditioning deterministic instead
+    # of cutting mid-word on a long, multi-part clip.
+    if len(seg) > 12_000:
+        chunks = silence.split_on_silence(
+            seg, min_silence_len=700, silence_thresh=-45, keep_silence=300, seek_step=10
+        )
+        candidates = [c for c in chunks if 1000 <= len(c) <= 12_000]
+        seg = max(candidates, key=len) if candidates else seg[:12_000]
+
     REF_VOICES_DIR.mkdir(parents=True, exist_ok=True)
     seg.export(str(_ref_wav_path(safe)), format="wav")
     meta = {
         "text": transcript,
+        "pace": round(float(pace), 3),
         "source": audio.filename or "",
         "created": time.time(),
         "duration": round(len(seg) / 1000.0, 3),
     }
     _ref_meta_path(safe).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[server] Registered reference voice '{safe}' ({meta['duration']}s)")
+    print(f"[server] Registered reference voice '{safe}' ({meta['duration']}s, pace {meta['pace']})")
     return {"id": safe, **meta}
 
 
@@ -677,6 +700,36 @@ async def delete_ref_voice(name: str):
         raise HTTPException(status_code=404, detail="Voice not found")
     print(f"[server] Removed reference voice '{safe}'")
     return {"ok": True, "id": safe}
+
+
+class RefVoiceUpdate(BaseModel):
+    pace: Optional[float] = None
+    text: Optional[str] = None
+
+
+@app.patch("/api/ref-voices/{name}")
+async def update_ref_voice(name: str, update: RefVoiceUpdate):
+    """Update a registered voice's pace and/or transcript without re-uploading audio."""
+    safe = _safe_ref_name(name)
+    meta_path = _ref_meta_path(safe)
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Voice not found")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Voice metadata corrupted")
+    if update.pace is not None:
+        if not 0.2 <= update.pace <= 5.0:
+            raise HTTPException(status_code=400, detail="pace must be between 0.2 and 5.0")
+        meta["pace"] = round(float(update.pace), 3)
+    if update.text is not None:
+        t = update.text.strip()
+        if not t:
+            raise HTTPException(status_code=400, detail="text must not be empty")
+        meta["text"] = t
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[server] Updated reference voice '{safe}'")
+    return {"id": safe, **meta}
 
 
 def _generate_kokoro(pipe: KPipeline, request: TTSRequest) -> np.ndarray:
@@ -740,13 +793,13 @@ def _generate_mms(request: TTSRequest, out_path: Path) -> None:
 
 def _generate_f5(request: TTSRequest, out_path: Path) -> None:
     f5 = get_f5()
-    ref_voice, ref_text = _resolve_ref_voice(f5, request)
+    ref_voice, ref_text, pace = _resolve_ref_voice(f5, request)
     f5["pipeline"](
         text=request.text,
         ref_voice=ref_voice,
         ref_text=ref_text,
         output_file=str(out_path),
-        speed=request.speed,
+        speed=request.speed / pace,
     )
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise HTTPException(status_code=500, detail="F5 produced no audio")
@@ -754,13 +807,13 @@ def _generate_f5(request: TTSRequest, out_path: Path) -> None:
 
 def _generate_jaitts(request: TTSRequest, out_path: Path) -> None:
     j = get_jaitts()
-    ref_voice, ref_text = _resolve_ref_voice(j, request)
+    ref_voice, ref_text, pace = _resolve_ref_voice(j, request)
     j["pipeline"](
         text=request.text,
         ref_voice=ref_voice,
         ref_text=ref_text,
         output_file=str(out_path),
-        speed=request.speed,
+        speed=request.speed / pace,
     )
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise HTTPException(status_code=500, detail="JaiTTS produced no audio")

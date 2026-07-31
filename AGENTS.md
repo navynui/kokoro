@@ -93,21 +93,29 @@ For `f5`/`jaitts`, the list appends one entry per registered reference voice (`V
 
 ### `POST /api/ref-voices`
 
-Register a reference voice for cloning. Multipart form fields: `name` (slug, <= 64 chars), `text` (exact transcript, required), `audio` (any format pydub/ffmpeg decodes; 1–60s; stored as trimmed 24 kHz mono WAV).
+Register a reference voice for cloning. Multipart form fields: `name` (slug, <= 64 chars), `text` (exact transcript, required), `pace` (float, default 1.0; > 1 = slower/more natural speech, applied as `speed / pace`), `audio` (any format pydub/ffmpeg decodes; 1–60s; stored as trimmed 24 kHz mono WAV, silence-clipped to <= 12s so inference conditioning stays deterministic). If the clip has multiple parts (e.g. English + Thai), the longest silence-delimited <= 12s segment is kept — the transcript must match that kept part, otherwise the byte-ratio duration estimate drifts.
 
 ```
-Response: 200 {"id", "text", "source", "created", "duration"} | 400/413
+Response: 200 {"id", "text", "pace", "source", "created", "duration"} | 400/413
 ```
 
 ### `GET /api/ref-voices`
 
 ```
-Response: 200 [{"id", "name", "language", "text", "source", "created", "duration"}, ...]
+Response: 200 [{"id", "name", "language", "text", "pace", "source", "created", "duration"}, ...]
 ```
 
 ### `GET /api/ref-voices/{name}`
 
 Serves the registered clip as `audio/wav`.
+
+### `PATCH /api/ref-voices/{name}`
+
+Update a voice's `pace` and/or `text` without re-uploading audio (JSON body, both optional). Useful to tune a clone that sounds rushed — e.g. `{"pace": 1.8}`.
+
+```
+Response: 200 {"id", ...meta} | 400/404
+```
 
 ### `DELETE /api/ref-voices/{name}`
 
@@ -225,6 +233,8 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - **JaiTTS specifics:** `./jaitts_models` holds the 1.35 GB `model.pt` + vocab from `JTS-AI/JaiTTS-F5TTS` (Apache 2.0). Same `flowtts` pipeline as `f5`; vocab is byte-identical to F5's, so it reuses the same char set and the same MMS-built ref voice (`F5_REF_TEXT`). Uses `AudioConfig(cfg_strength=2.5)` per the JaiTTS quickstart. The XLM-R duration-predictor variant from the paper is not released — only the base F5 checkpoint. Warm synthesis ~2.3s on P100.
 - **Voice cloning (f5/jaitts):** zero-shot — the flowtts pipeline conditions on any (ref_wav, ref_text) pair. Registered voices live in `./ref_voices` (`{name}.wav` + `{name}.json`), volume-mounted and gitignored, and are NOT exposed via `/media/list`. Upload requires the exact transcript (phase 1; auto-transcribe with a local ASR is a possible phase 2 — the pipeline's built-in `transcribe()` would pull a ~3 GB whisper model). `ref`/`ref_text` on the TTS request clones from any existing file in `./output` or `./ref_voices`. Cloning quality depends on the clip: 5–20s, single speaker, clean audio, accurate transcript.
 - **GPU idle unload:** GPU models (Kokoro, MMS, F5, JaiTTS) are dropped from VRAM after `IDLE_UNLOAD_MINUTES` (default 10, set in docker-compose `environment`; `0` disables) with no API/web activity. A FastAPI middleware (`activity_middleware`) records activity + in-flight requests; a daemon thread polls every 30s and calls `_unload_gpu_models()` (drops singletons, `gc.collect()`, `torch.cuda.empty_cache()`). Re-init after unload is fast (weights on disk): F5 ~2s, MMS ~1s, Kokoro ~3s. CPU engines (Thai/Piper) stay loaded.
+- **Thai duration scale (Dockerfile patch):** the flowtts UTF-8 byte-ratio duration formula underestimates for Thai, producing rushed speech at `speed=1.0` (JaiTTS paper calls this out). The Dockerfile patches the installed `flowtts/infer/utils_infer.py` to multiply the predicted duration by `F5_DURATION_SCALE` (env, default `1.8`, set in docker-compose). Also patches `flowtts/inference.py` to use unique per-request temp ref filenames (was fixed `temp_short_ref.wav`/`ref_converted.wav`). F5-family pipelines (f5, jaitts, and all clones) now sound natural at `speed=1.0`; the old workaround of `speed=0.5` is no longer needed.
+- **Voice clone tuning:** each registered voice has a `pace` (default 1.0) applied as `speed / pace` server-side — raise it if a clone sounds rushed, lower it if too slow. Adjustable after registration via `PATCH /api/ref-voices/{name}` or the ✎ button in the web UI. F5-family `ModelConfig` uses a fixed `seed=0` so cloned-voice outputs are reproducible (the default `-1` randomized sampling every call, which made clone fidelity vary run-to-run).
 - **Single worker:** Uvicorn runs without `--workers` to keep things simple.
 - **Host port 8001** is used because something else is on 8000.
 - **Model cache persisted** via `~/.cache/huggingface` volume mount.

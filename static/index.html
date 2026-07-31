@@ -150,14 +150,19 @@
         <label for="ref-name">Voice name</label>
         <input type="text" id="ref-name" placeholder="e.g. my-voice" style="width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:0.6rem;font-size:0.9rem;">
       </div>
+      <div style="flex:0 0 110px;">
+        <label for="ref-pace">Pace</label>
+        <input type="number" id="ref-pace" value="1.0" min="0.2" max="5.0" step="0.1" style="width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:0.6rem;font-size:0.9rem;">
+        <div style="font-size:0.7rem;color:#64748b;margin-top:0.2rem;">&gt;1 = slower</div>
+      </div>
       <div style="flex:2;">
-        <label for="ref-text">Transcript of the clip (required — type exactly what is said)</label>
+        <label for="ref-text">Transcript of the clip (type exactly what is said — must match the kept part; multi-part clips keep the longest ≤12s segment)</label>
         <textarea id="ref-text" placeholder="Type exactly what the person says in the audio…" style="min-height:60px;"></textarea>
       </div>
     </div>
     <div class="form-row">
       <div style="flex:2;">
-        <label for="ref-file">Reference audio (5–20s, single speaker)</label>
+        <label for="ref-file">Reference audio (5–20s, single speaker; clipped to ≤12s)</label>
         <input type="file" id="ref-file" accept="audio/*,video/*,.wav,.mp3,.m4a,.ogg,.flac,.mp4,.webm,.mov,.mkv" style="width:100%;color:#94a3b8;font-size:0.85rem;">
       </div>
       <div style="flex:1;display:flex;align-items:flex-end;">
@@ -389,10 +394,11 @@ async function loadRefVoices() {
     list.innerHTML = voices.map(v => `<li>
       <div class="file-info">
         <div class="name"><span class="badge badge-audio">🎙</span>${v.id}</div>
-        <div class="meta">${v.duration}s — ${fmtTime(v.created)}</div>
+        <div class="meta">${v.duration}s · pace ${v.pace ?? 1.0} — ${fmtTime(v.created)}</div>
       </div>
       <div class="file-actions">
         <button class="btn btn-sm btn-ghost" onclick="playRefVoice('${v.id}')" title="Play">▶</button>
+        <button class="btn btn-sm btn-ghost" onclick="editRefPace('${v.id}')" title="Edit pace">✎</button>
         <button class="btn btn-sm btn-ghost" onclick="deleteRefVoice('${v.id}')" title="Delete">🗑</button>
       </div>
     </li>`).join('');
@@ -403,6 +409,23 @@ async function loadRefVoices() {
 
 function playRefVoice(name) {
   showPlayer(`/api/ref-voices/${encodeURIComponent(name)}`, 'audio');
+}
+
+async function editRefPace(name) {
+  const res0 = await fetch('/api/ref-voices');
+  const voices = res0.ok ? await res0.json() : [];
+  const cur = (voices.find(x => x.id === name) || {}).pace ?? 1.0;
+  const val = prompt(`New pace for '${name}' (0.2–5, >1 = slower):`, cur);
+  if (val === null) return;
+  const pace = parseFloat(val);
+  if (isNaN(pace) || pace < 0.2 || pace > 5) { toast('Invalid pace'); return; }
+  const res = await fetch(`/api/ref-voices/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pace }),
+  });
+  if (res.ok) { toast('Pace updated'); loadRefVoices(); }
+  else toast('Update failed');
 }
 
 async function deleteRefVoice(name) {
@@ -432,6 +455,7 @@ async function registerVoice() {
     const fd = new FormData();
     fd.append('name', name);
     fd.append('text', text);
+    fd.append('pace', document.getElementById('ref-pace').value || '1.0');
     fd.append('audio', fileInput.files[0]);
     const res = await fetch('/api/ref-voices', { method: 'POST', body: fd });
     if (!res.ok) {

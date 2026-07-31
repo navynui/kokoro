@@ -35,6 +35,33 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir torch==2.7.1+cu126 torchvision==0.22.1+cu126 torchaudio==2.7.1+cu126 \
         --index-url https://download.pytorch.org/whl/cu126
 
+# Patch the installed flowtts (thonburian-tts fork):
+#  1) Thai-aware duration scale — the UTF-8 byte-ratio duration estimate is
+#     brittle for Thai (rushed/compressed speech). F5_DURATION_SCALE (env,
+#     default 1.8) stretches the predicted duration so speed=1.0 sounds natural.
+#  2) Unique temp ref filenames — the pipeline used fixed temp_short_ref.wav /
+#     ref_converted.wav, a shared-state hazard between overlapping requests.
+RUN python - <<'EOF'
+import pathlib
+p = pathlib.Path("/usr/local/lib/python3.11/site-packages/flowtts/infer/utils_infer.py")
+s = p.read_text()
+old = "duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)"
+new = ("duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed "
+       "* float(os.environ.get('F5_DURATION_SCALE', '1.8')))")
+assert old in s, "duration line not found in utils_infer.py"
+p.write_text(s.replace(old, new))
+
+p2 = pathlib.Path("/usr/local/lib/python3.11/site-packages/flowtts/inference.py")
+s2 = p2.read_text()
+s2 = s2.replace('ref_wav_path = self.temp_dir / "ref_converted.wav"',
+                'import uuid as _uuid; ref_wav_path = self.temp_dir / f"ref_converted_{_uuid.uuid4().hex}.wav"')
+s2 = s2.replace('temp_short_ref = self.temp_dir / "temp_short_ref.wav"',
+                'import uuid as _uuid2; temp_short_ref = self.temp_dir / f"temp_short_ref_{_uuid2.uuid4().hex}.wav"')
+assert "ref_converted_" in s2 and "temp_short_ref_" in s2, "temp-file patch failed"
+p2.write_text(s2)
+print("flowtts patched (duration scale + unique temp refs)")
+EOF
+
 COPY server.py .
 COPY static static/
 
