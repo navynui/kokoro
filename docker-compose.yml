@@ -8,6 +8,8 @@ services:
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
       - ./output:/app/output
+      - ./piper_models:/app/piper_models
+      - ./pythai_voices:/app/voices
     deploy:
       resources:
         reservations:

@@ -1,3 +1,7 @@
 # Generated audio files
 output/
 *.wav
+
+# Downloaded model voices (Piper ONNX, Thai Vachana)
+piper_models/
+pythai_voices/

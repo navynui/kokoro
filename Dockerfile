@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
         fastapi>=0.115.0 \
         uvicorn[standard]>=0.34.0 \
         kokoro>=0.9.2 \
+        piper-tts>=1.6.0 \
+        pythaitts>=0.4.2 \
         soundfile>=0.13.0 \
         numpy>=1.26.0
 

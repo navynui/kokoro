@@ -1,6 +1,6 @@
 # Kokoro TTS Server
 
-A lightweight, production-ready local TTS server using [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) — a fast, high-quality text-to-speech model. Runs GPU-accelerated on an NVIDIA GTX 1060 when available, with automatic CPU fallback.
+A lightweight, production-ready local TTS server with **three local engines**: Kokoro-82M (GPU-accelerated on an NVIDIA GTX 1060 with automatic CPU fallback), Thai Vachana (PyThaiTTS, CPU/ONNX), and Piper (CPU/ONNX, 15+ languages). All inference runs locally — no cloud APIs.
 
 Serves a REST API compatible with typical `/v1/audio/speech` patterns. Containerised with Docker for easy deployment.
 
@@ -16,7 +16,7 @@ Server is live at **`http://localhost:8001`** — open it in a browser on any de
 - **Web UI** — `http://localhost:8001/` — generate speech, play inline, browse/download/share files
 - **Swagger UI** — `http://localhost:8001/docs` — interactive API docs
 
-On first request the container downloads the ~300 MB model weights automatically.
+On first use each engine downloads its model automatically: Kokoro (~300 MB once), Piper (~60 MB per voice), Thai Vachana (~60 MB per voice). Subsequent requests are fast and fully offline.
 
 ## API
 
@@ -30,21 +30,33 @@ Generate speech from text.
 {
   "text": "Hello world!",
   "voice": "af_bella",
-  "speed": 1.0
+  "speed": 1.0,
+  "engine": "kokoro"
 }
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `text` | string | (required) | Text to synthesise |
-| `voice` | string | `"af_heart"` | Voice ID (see below) |
+| `voice` | string | `"af_heart"` | Voice ID (see `/voices` per engine) |
 | `speed` | number | `1.0` | Speaking speed |
+| `engine` | string | `"kokoro"` | `kokoro` \| `thai` \| `piper` |
 
-**Response:** WAV audio (`audio/wav`), 24 kHz, 16-bit mono.
+**Response:** WAV audio (`audio/wav`), 16-bit mono. Sample rate is engine-dependent (Kokoro 24 kHz, Thai/Piper 22.05 kHz).
 
 ### `GET /health`
 
 Health check — returns `{"status": "ok"}`.
+
+### `GET /voices`
+
+List voices for an engine:
+
+```
+GET /voices?engine=kokoro | thai | piper
+```
+
+Returns a JSON array of `{"id", "name", "language"}` objects (language omitted for Kokoro).
 
 ### `GET /`
 
@@ -86,6 +98,37 @@ Backward-compatible — returns only `.wav` files (same format as above, without
 ### `GET /audio/{filename}`
 
 Serve any media file with the correct MIME type for playback or download.
+
+## Engines
+
+| Engine | `engine` value | Runs on | Languages | Voices |
+|---|---|---|---|---|
+| **Kokoro-82M** | `kokoro` | GPU (GTX 1060), CPU fallback | English | ~150, curated list below |
+| **Thai Vachana** (PyThaiTTS) | `thai` | CPU (ONNX) | Thai | `th_f_1`, `th_f_2`, `th_m_1`, `th_m_2` |
+| **Piper** | `piper` | CPU (ONNX) | 15+ (EN, DE, FR, ES, IT, PT, RU, UK, VI, AR, ZH, NL, PL, TR, …) | curated list in `/voices` |
+
+The web UI exposes an **Engine** dropdown next to the voice picker; voice lists load from `/voices?engine=…`.
+
+**First-use downloads** (persisted, see Persistent Storage):
+- Kokoro: model weights (~300 MB) via the HuggingFace cache
+- Piper: `piper_models/<voice>.onnx` (~60 MB each) from `rhasspy/piper-voices`
+- Thai: `pythai_voices/<voice>.onnx` (~60 MB each) from `VIZINTZOR/VachanaTTS`
+
+### curl examples
+
+```bash
+# Thai
+curl -X POST "http://localhost:8001/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "สวัสดีครับ", "engine": "thai", "voice": "th_f_1"}' \
+  --output thai.wav
+
+# Piper
+curl -X POST "http://localhost:8001/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello from Piper.", "engine": "piper", "voice": "en_US-lessac-medium"}' \
+  --output piper.wav
+```
 
 ## Voices
 
@@ -142,8 +185,10 @@ ports:
 
 | Mount | Host path | Container path | Purpose |
 |---|---|---|
-| HuggingFace cache | `~/.cache/huggingface` | `/root/.cache/huggingface` | Model weights (~300 MB) survive rebuilds |
+| HuggingFace cache | `~/.cache/huggingface` | `/root/.cache/huggingface` | Kokoro model weights (~300 MB) survive rebuilds |
 | Audio output | `./output` | `/app/output` | Generated WAV files survive rebuilds, accessible from host |
+| Piper voices | `./piper_models` | `/app/piper_models` | Piper ONNX voices (~60 MB each) |
+| Thai voices | `./pythai_voices` | `/app/voices` | Thai Vachana ONNX voices (~60 MB each) |
 
 To clear the model cache and force a fresh download:
 
@@ -201,6 +246,8 @@ Kokoro-82M itself needs only ~1 GiB VRAM, so GPU OOM is unlikely unless other pr
 ├── static/
 │   └── index.html       # Web UI — TTS form, player, file browser
 ├── output/              # Generated WAV files (gitignored)
+├── piper_models/        # Downloaded Piper ONNX voices (gitignored)
+├── pythai_voices/       # Downloaded Thai Vachana ONNX voices (gitignored)
 ├── .gitignore
 ├── README.md            # This file
 ├── AGENTS.md            # AI assistant context

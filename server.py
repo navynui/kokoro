@@ -1,15 +1,18 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
+from typing import Literal
 from kokoro import KPipeline
 import torch
 import threading
 import soundfile as sf
 import numpy as np
 import uuid
+import shutil
+import urllib.request
 from pathlib import Path
 
-app = FastAPI(title="Kokoro TTS Server", version="1.2.0")
+app = FastAPI(title="Kokoro TTS Server", version="1.3.0")
 
 # Lazy init — model downloads on first request, not at import time
 pipeline: KPipeline | None = None
@@ -59,6 +62,114 @@ OUTPUT_DIR = BASE_DIR / "output"
 STATIC_DIR = BASE_DIR / "static"
 OUTPUT_DIR.mkdir(exist_ok=True)
 STATIC_DIR.mkdir(exist_ok=True)
+
+# ── Engines ──────────────────────────────────────────────────────────────
+# kokoro (GPU, default) | thai (PyThaiTTS/VachanaTTS2, CPU) | piper (CPU)
+
+PIPER_DIR = BASE_DIR / "piper_models"
+PIPER_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+
+KOKORO_VOICES = [
+    {"id": "af_heart", "name": "Heart (warm female)"},
+    {"id": "af_bella", "name": "Bella (bright female)"},
+    {"id": "af_nicole", "name": "Nicole (professional female)"},
+    {"id": "af_sarah", "name": "Sarah (soft female)"},
+    {"id": "af_sky", "name": "Sky (calm female)"},
+    {"id": "am_adam", "name": "Adam (neutral male)"},
+    {"id": "am_michael", "name": "Michael (deep male)"},
+    {"id": "am_fenrir", "name": "Fenrir (low male)"},
+    {"id": "am_puck", "name": "Puck (light male)"},
+]
+
+THAI_VOICES = [
+    {"id": "th_f_1", "name": "Female 1", "language": "Thai"},
+    {"id": "th_f_2", "name": "Female 2", "language": "Thai"},
+    {"id": "th_m_1", "name": "Male 1", "language": "Thai"},
+    {"id": "th_m_2", "name": "Male 2", "language": "Thai"},
+]
+
+PIPER_VOICES = [
+    {"id": "en_US-lessac-medium", "name": "Lessac", "language": "English (US)"},
+    {"id": "en_GB-alan-medium", "name": "Alan", "language": "English (UK)"},
+    {"id": "de_DE-thorsten-medium", "name": "Thorsten", "language": "German"},
+    {"id": "fr_FR-siwis-medium", "name": "Siwis", "language": "French"},
+    {"id": "es_ES-davefx-medium", "name": "David", "language": "Spanish"},
+    {"id": "it_IT-riccardo-x_low", "name": "Riccardo", "language": "Italian"},
+    {"id": "pt_BR-faber-medium", "name": "Faber", "language": "Portuguese (BR)"},
+    {"id": "ru_RU-irina-medium", "name": "Irina", "language": "Russian"},
+    {"id": "uk_UA-ukrainian_ts-medium", "name": "Ukrainian", "language": "Ukrainian"},
+    {"id": "vi_VN-vais1000-medium", "name": "VAIS 1000", "language": "Vietnamese"},
+    {"id": "ar_AR-omarsalim-medium", "name": "Omar Salim", "language": "Arabic"},
+    {"id": "zh_CN-huayan-medium", "name": "Huayan", "language": "Chinese (Mandarin)"},
+    {"id": "nl_NL-mls-medium", "name": "MLS", "language": "Dutch"},
+    {"id": "pl_PL-darkman-medium", "name": "Darkman", "language": "Polish"},
+    {"id": "tr_TR-fahrettin-medium", "name": "Fahrettin", "language": "Turkish"},
+]
+
+
+def _piper_paths(voice_id: str) -> tuple[str, str]:
+    """Map 'en_US-lessac-medium' → (onnx_url, config_url) on HF."""
+    parts = voice_id.split("-")
+    if len(parts) < 3:
+        raise ValueError(f"Invalid piper voice id: {voice_id}")
+    quality = parts[-1]
+    lang_dialect = parts[0]            # en_US
+    name = "-".join(parts[1:-1])       # lessac
+    lang = lang_dialect.split("_")[0]  # en
+    base = f"{PIPER_BASE}/{lang}/{lang_dialect}/{name}/{quality}/{voice_id}"
+    return base + ".onnx", base + ".onnx.json"
+
+
+def _download(url: str, dest: Path) -> None:
+    """Download url to dest (atomic), skipping if already present."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and dest.stat().st_size > 0:
+        return
+    print(f"[server] Downloading {url} → {dest.name}")
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with urllib.request.urlopen(url, timeout=120) as resp, open(tmp, "wb") as f:
+        shutil.copyfileobj(resp, f)
+    tmp.replace(dest)
+
+
+_piper_lock = threading.Lock()
+_piper_voices: dict[str, "PiperVoice"] = {}
+
+
+def get_piper_voice(voice_id: str) -> "PiperVoice":
+    """Lazy-load a Piper ONNX voice, downloading it on first use."""
+    if voice_id in _piper_voices:
+        return _piper_voices[voice_id]
+    with _piper_lock:
+        if voice_id in _piper_voices:
+            return _piper_voices[voice_id]
+        from piper import PiperVoice
+        onnx_url, json_url = _piper_paths(voice_id)
+        onnx_path = PIPER_DIR / f"{voice_id}.onnx"
+        json_path = PIPER_DIR / f"{voice_id}.onnx.json"
+        _download(onnx_url, onnx_path)
+        _download(json_url, json_path)
+        print(f"[server] Loading Piper voice {voice_id}…")
+        voice = PiperVoice.load(str(onnx_path), config_path=str(json_path))
+        _piper_voices[voice_id] = voice
+        return voice
+
+
+_thai_lock = threading.Lock()
+_pythai = None
+
+
+def get_pythai():
+    """Lazy singleton for PyThaiTTS (VachanaTTS2, CPU/ONNX)."""
+    global _pythai
+    if _pythai is None:
+        with _thai_lock:
+            if _pythai is None:
+                from pythaitts import TTS as PyThaiTTS
+                (BASE_DIR / "voices").mkdir(exist_ok=True)
+                print("[server] Initializing PyThaiTTS (vachana)…")
+                _pythai = PyThaiTTS(pretrained="vachana")
+    return _pythai
 
 # Media types we recognise
 MEDIA_EXTENSIONS = {
@@ -113,6 +224,7 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = "af_heart"
     speed: float = 1.0
+    engine: Literal["kokoro", "thai", "piper"] = "kokoro"
 
 
 # ── Web UI ──────────────────────────────────────────────────────────────
@@ -159,7 +271,19 @@ async def health():
     return {"status": "ok"}
 
 
-def _generate_audio(pipe: KPipeline, request: TTSRequest) -> np.ndarray:
+@app.get("/voices")
+async def list_voices(engine: str = "kokoro"):
+    """List available voices for an engine."""
+    if engine == "kokoro":
+        return KOKORO_VOICES
+    if engine == "thai":
+        return THAI_VOICES
+    if engine == "piper":
+        return PIPER_VOICES
+    raise HTTPException(status_code=422, detail=f"Unknown engine: {engine}")
+
+
+def _generate_kokoro(pipe: KPipeline, request: TTSRequest) -> np.ndarray:
     generator = pipe(
         request.text,
         voice=request.voice,
@@ -178,30 +302,65 @@ def _generate_audio(pipe: KPipeline, request: TTSRequest) -> np.ndarray:
     return np.concatenate(all_audio)
 
 
+def _generate_thai(request: TTSRequest, out_path: Path) -> None:
+    tts = get_pythai()
+    # Numbers → Thai words, ๆ expansion (built-in preprocessor)
+    from pythaitts import preprocess_text
+    text = preprocess_text(request.text)
+    tts.model(
+        text=text,
+        speaker_idx=request.voice,
+        speed=request.speed,
+        return_type="file",
+        filename=str(out_path),
+    )
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail="Thai TTS produced no audio")
+
+
+def _generate_piper(request: TTSRequest, out_path: Path) -> None:
+    from piper import SynthesisConfig
+    voice = get_piper_voice(request.voice)
+    chunks = list(voice.synthesize(
+        request.text,
+        syn_config=SynthesisConfig(length_scale=1.0 / max(request.speed, 0.1)),
+    ))
+    if not chunks:
+        raise HTTPException(status_code=500, detail="Piper produced no audio")
+    audio = np.concatenate([c.audio_float_array for c in chunks])
+    sf.write(str(out_path), audio, chunks[0].sample_rate)
+
+
 def _is_oom(e: Exception) -> bool:
     return isinstance(e, RuntimeError) and "out of memory" in str(e).lower()
 
 
 @app.post("/v1/audio/speech")
 async def generate_speech(request: TTSRequest):
+    out_id = uuid.uuid4().hex[:12]
+    out_path = OUTPUT_DIR / f"{out_id}.wav"
+
     try:
-        combined = _generate_audio(get_pipeline(), request)
+        if request.engine == "kokoro":
+            combined = _generate_kokoro(get_pipeline(), request)
+            sf.write(str(out_path), combined, 24000)
+        elif request.engine == "thai":
+            _generate_thai(request, out_path)
+        else:  # piper
+            _generate_piper(request, out_path)
     except Exception as e:
-        if not _is_oom(e):
+        if request.engine != "kokoro" or not _is_oom(e):
             raise HTTPException(status_code=500, detail=str(e))
-        # VRAM exhausted mid-generation — rebuild on CPU and retry once.
+        # Kokoro: VRAM exhausted mid-generation — rebuild on CPU and retry once.
         global pipeline
         print("[server] CUDA out of memory during generation; falling back to CPU")
         with _pipeline_lock:
             pipeline = _build_pipeline('cpu')
         try:
-            combined = _generate_audio(get_pipeline(), request)
+            combined = _generate_kokoro(get_pipeline(), request)
+            sf.write(str(out_path), combined, 24000)
         except Exception as e2:
             raise HTTPException(status_code=500, detail=str(e2))
-
-    out_id = uuid.uuid4().hex[:12]
-    out_path = OUTPUT_DIR / f"{out_id}.wav"
-    sf.write(str(out_path), combined, 24000)
 
     return FileResponse(
         str(out_path),
