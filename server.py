@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import Literal
@@ -10,9 +10,73 @@ import numpy as np
 import uuid
 import shutil
 import urllib.request
+import os
+import time
+import gc
 from pathlib import Path
 
-app = FastAPI(title="Kokoro TTS Server", version="1.3.0")
+app = FastAPI(title="Kokoro TTS Server", version="1.4.0")
+
+# ── GPU idle unload ─────────────────────────────────────────────────────
+# GPU models (Kokoro, MMS, F5) are dropped from VRAM after this many
+# minutes without any API/web activity. Set to 0 to disable.
+IDLE_UNLOAD_MINUTES = float(os.environ.get("IDLE_UNLOAD_MINUTES", "10"))
+IDLE_UNLOAD_SECONDS = IDLE_UNLOAD_MINUTES * 60
+_last_activity = time.time()
+_active_requests = 0
+_activity_lock = threading.Lock()
+_unload_lock = threading.Lock()
+
+
+def _touch_activity() -> None:
+    global _last_activity
+    with _activity_lock:
+        _last_activity = time.time()
+
+
+def _unload_gpu_models() -> None:
+    """Drop GPU singletons so VRAM is released; next request re-initializes."""
+    global pipeline, _mms, _f5
+    with _unload_lock:
+        if pipeline is None and _mms is None and _f5 is None:
+            return
+        print(f"[server] Idle > {IDLE_UNLOAD_MINUTES:.0f} min — unloading GPU models from VRAM")
+        pipeline = None
+        _mms = None
+        _f5 = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("[server] GPU models unloaded; next request will re-initialize")
+
+
+def _idle_unload_loop() -> None:
+    while True:
+        time.sleep(30)
+        try:
+            if IDLE_UNLOAD_SECONDS <= 0:
+                continue
+            with _activity_lock:
+                idle_secs = time.time() - _last_activity
+                busy = _active_requests > 0
+            if not busy and idle_secs >= IDLE_UNLOAD_SECONDS:
+                _unload_gpu_models()
+        except Exception as e:
+            print(f"[server] idle-unload error: {e}")
+
+
+@app.middleware("http")
+async def activity_middleware(request: Request, call_next):
+    """Any request (API or web) counts as activity and resets the idle timer."""
+    global _active_requests
+    _touch_activity()
+    with _activity_lock:
+        _active_requests += 1
+    try:
+        return await call_next(request)
+    finally:
+        with _activity_lock:
+            _active_requests -= 1
 
 # Lazy init — model downloads on first request, not at import time
 pipeline: KPipeline | None = None
@@ -484,3 +548,8 @@ async def generate_speech(request: TTSRequest):
         filename="speech.wav",
         headers={"X-Audio-Filename": f"{out_id}.wav"},
     )
+
+
+if IDLE_UNLOAD_MINUTES > 0:
+    threading.Thread(target=_idle_unload_loop, daemon=True).start()
+    print(f"[server] GPU idle-unload enabled ({IDLE_UNLOAD_MINUTES:.0f} min)")

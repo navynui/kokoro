@@ -256,6 +256,8 @@ GPU engines (Kokoro, Thai MMS, Thai Thonburian/F5) run on the **fastest availabl
 
 Kokoro and MMS need ~1 GB VRAM; F5 needs ~1.7 GB, so OOM is unlikely unless other processes are using the cards.
 
+**GPU idle unload:** To free VRAM for other host workloads, GPU models (Kokoro, MMS, F5) are unloaded after **10 minutes** with no API/web activity — the next request re-initializes them from disk (~1–3s). Configure via `IDLE_UNLOAD_MINUTES` in `docker-compose.yml` (set to `0` to disable). Any request resets the timer, and an in-flight request is never interrupted.
+
 ## Project Structure
 
 ```

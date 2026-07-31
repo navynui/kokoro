@@ -5,6 +5,9 @@ services:
     ports:
       - "8001:8000"
     restart: unless-stopped
+    environment:
+      # Unload GPU models from VRAM after this many minutes of no activity (0 = disabled)
+      - IDLE_UNLOAD_MINUTES=10
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
       - ./output:/app/output
