@@ -1,6 +1,6 @@
 # Kokoro TTS Server — Agent Skill
 
-Generate speech from text using three local TTS engines — Kokoro-82M (GPU), Thai Vachana (PyThaiTTS), and Piper — via a local Dockerized FastAPI server.
+Generate speech from text using five local TTS engines — Kokoro-82M (GPU), Thai Vachana (PyThaiTTS), Thai MMS, Thai Thonburian (F5-TTS), and Piper — via a local Dockerized FastAPI server.
 
 ## Quick Reference
 
@@ -15,7 +15,7 @@ Generate speech from text using three local TTS engines — Kokoro-82M (GPU), Th
 
 ## Background
 
-The server wraps three local engines in a FastAPI server inside Docker: **Kokoro-82M** (GPU-accelerated on a GTX 1060, English, ~150 voices), **Thai Vachana** (PyThaiTTS VachanaTTS2, VITS-ONNX on CPU, 4 Thai voices), and **Piper** (ONNX on CPU, 15+ languages). All inference runs locally. The server also serves a mobile-responsive web UI with an engine/voice picker for generating, playing, browsing, downloading, and sharing audio files.
+The server wraps five local engines in a FastAPI server inside Docker: **Kokoro-82M** (GPU-accelerated on a GTX 1060, English, ~150 voices), **Thai Vachana** (PyThaiTTS VachanaTTS2, VITS-ONNX on CPU, 4 Thai voices), **Thai MMS** (Meta `mms-tts-tha`, GPU, 16 kHz), **Thai Thonburian** (F5-TTS Mega, GPU, best Thai quality, 24 kHz), and **Piper** (ONNX on CPU, 15+ languages). All inference runs locally. The server also serves a mobile-responsive web UI with an engine/voice picker for generating, playing, browsing, downloading, and sharing audio files.
 
 - **Server URL:** `http://localhost:8001` (or host LAN IP from other devices)
 - **Audio format:** 16-bit mono WAV — 24 kHz (Kokoro), 22.05 kHz (Thai/Piper)
@@ -57,6 +57,8 @@ Generate speech from text.
 |---|---|---|---|
 | `kokoro` (default) | ❌ | ✅ | ~150 (curated in `/voices`), e.g. `af_bella` |
 | `thai` | ✅ | ✅ | `th_f_1`, `th_f_2`, `th_m_1`, `th_m_2` |
+| `mms` | ✅ | ✅ | `facebook/mms-tts-tha` (16 kHz, fast, stable) |
+| `f5` | ✅ | ✅ | `default` (best quality, diffusion, 24 kHz, slowest ~4s) |
 | `piper` | ❌ | ✅ | 15 curated, e.g. `en_US-lessac-medium` |
 
 First use of each engine downloads its model (~60–300 MB); subsequent requests are fast and fully offline.

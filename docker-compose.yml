@@ -10,6 +10,7 @@ services:
       - ./output:/app/output
       - ./piper_models:/app/piper_models
       - ./pythai_voices:/app/voices
+      - ./f5_models:/app/f5_models
     deploy:
       resources:
         reservations:

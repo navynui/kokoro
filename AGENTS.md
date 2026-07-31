@@ -5,7 +5,7 @@
 - **Name:** Kokoro TTS Server
 - **Path:** `~/dev/kokoro/`
 - **Purpose:** Lightweight local TTS server via Docker, exposing a FastAPI REST endpoint backed by Kokoro-82M.
-- **Stack:** Python 3.11, FastAPI, Uvicorn, Kokoro-82M (GPU) + PyThaiTTS/Vachana (Thai, CPU) + Piper (CPU), Docker Compose.
+- **Stack:** Python 3.11, FastAPI, Uvicorn, Kokoro-82M (GPU) + Thai Vachana/MMS/Thonburian-F5 (see Engines) + Piper (CPU), Docker Compose.
 - **GPU:** Pinned to the host's NVIDIA GTX 1060 6GB (`GPU-ebd852dc-b885-2874-feb2-1b37c939588b`) via Docker device reservation. Torch is pinned to `2.7.1+cu126` because newer builds dropped Pascal (sm_61) kernels. The Tesla P100 on the host is left untouched. Automatic CPU fallback when VRAM is insufficient (see Constraints & Notes). Only the Kokoro engine uses the GPU; Thai/Piper run on CPU (ONNX).
 
 ## Key Files
@@ -29,6 +29,8 @@ Browser ──POST /v1/audio/speech────> FastAPI ──> engine ──> 
                                                  ├─ kokoro: KPipeline (GPU)
                                                  ├─ thai:    PyThaiTTS/Vachana (CPU/ONNX)
                                                  └─ piper:   PiperVoice (CPU/ONNX)
+  MMS (`mms`): transformers VitsModel (facebook/mms-tts-tha), 16 kHz, GPU.
+  F5 (`f5`): ThonburianTTS FlowTTSPipeline (F5-TTS Mega), 24 kHz, GPU; auto-builds a default ref voice via MMS on first use.
                                               Downloads model
                                               on first use
 ```
@@ -60,7 +62,7 @@ Request:
   "text": string       (required)
   "voice": string      (default "af_heart")
   "speed": float       (default 1.0)
-  "engine": string     (default "kokoro"; "kokoro" | "thai" | "piper")
+  "engine": string     (default "kokoro"; "kokoro" | "thai" | "piper" | "mms" | "f5")
 }
 
 Headers (response):
@@ -76,7 +78,7 @@ Response: 200 audio/wav (binary) | 500 {"detail": "..."}
 ### `GET /voices`
 
 ```
-GET /voices?engine=kokoro|thai|piper
+GET /voices?engine=kokoro|thai|piper|mms|f5
 Response: 200 [{"id", "name", "language"}, ...] | 422 unknown engine
 ```
 
@@ -121,6 +123,7 @@ uvicorn[standard] >= 0.34.0
 kokoro >= 0.9.2
 piper-tts >= 1.6.0     # pulls onnxruntime (CPU)
 pythaitts >= 0.4.2     # pulls onnxruntime, vachanatts, pythainlp, ssg
+thonburian-tts (git)   # pulls f5-tts, vocos, librosa, torchaudio/torchvision; cloned+pinned in Dockerfile (repo lacks __init__.py)
 soundfile >= 0.13.0
 numpy >= 1.26.0
 ```
@@ -184,7 +187,8 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - **No auth:** Server has no authentication. Use a reverse proxy (nginx/Caddy) if exposing outside localhost or the internet.
 - **GPU wired:** The container requests the host's GTX 1060 (Pascal sm_61) via `deploy.resources.reservations.devices` pinned by UUID. Torch is pinned to `2.7.1+cu126` — newer PyPI torch builds (cu13x) dropped sm_61 kernels. First request still takes ~10–30s for model load; subsequent requests are faster on GPU.
 - **CPU fallback (automatic):** `server.py` guards against missing/low VRAM in three ways — (1) `_pick_device()` checks `torch.cuda.mem_get_info()` and uses CPU if free VRAM < `MIN_FREE_VRAM` (1.5 GiB); (2) `_build_pipeline()` retries on CPU if CUDA init raises; (3) `_generate_kokoro()` catches mid-generation CUDA OOM, rebuilds the pipeline on CPU, and retries the request once (subsequent requests stay on CPU to avoid thrashing). Applies to the Kokoro engine only.
-- **Engines:** `engine` field on the API selects `kokoro` (GPU) / `thai` (PyThaiTTS VachanaTTS2, CPU/ONNX) / `piper` (Piper, CPU/ONNX). All are lazy-loaded singletons. Piper voices download on first use from `rhasspy/piper-voices` (URL derived from voice id: `{lang}/{lang}_{dialect}/{name}/{quality}/{voice_id}.onnx`); Thai voices from `VIZINTZOR/VachanaTTS` (written by `vachanatts` to `/app/voices`). Thai text is preprocessed (digits → Thai words, ๆ expansion) before synthesis.
+- **Engines:** `engine` field on the API selects `kokoro` (GPU) / `thai` (PyThaiTTS VachanaTTS2, CPU/ONNX) / `piper` (Piper, CPU/ONNX) / `mms` (Meta MMS-TTS Thai, GPU, 16 kHz) / `f5` (ThonburianTTS F5-TTS Mega, GPU, 24 kHz, best Thai quality). All are lazy-loaded singletons. Piper voices download on first use from `rhasspy/piper-voices` (URL derived from voice id: `{lang}/{lang}_{dialect}/{name}/{quality}/{voice_id}.onnx`); Thai voices from `VIZINTZOR/VachanaTTS` (written by `vachanatts` to `/app/voices`). Thai text is preprocessed (digits → Thai words, ๆ expansion) before synthesis.
+- **F5 specifics:** `./f5_models` holds the 1.35 GB `mega_f5_last.safetensors` + vocab + `ref_voice.wav`. The ref voice is synthesized once via MMS (`F5_REF_TEXT`) so the pipeline never triggers its whisper-based `transcribe()` (which would need a ~3 GB ASR model). F5 runs fp32 on the GTX 1060 (~1.6 GB VRAM, ~4 s/sentence cached). Requires `ffmpeg` (pydub).
 - **Single worker:** Uvicorn runs without `--workers` to keep things simple.
 - **Host port 8001** is used because something else is on 8000.
 - **Model cache persisted** via `~/.cache/huggingface` volume mount.

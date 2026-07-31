@@ -1,6 +1,6 @@
 # Kokoro TTS Server
 
-A lightweight, production-ready local TTS server with **three local engines**: Kokoro-82M (GPU-accelerated on an NVIDIA GTX 1060 with automatic CPU fallback), Thai Vachana (PyThaiTTS, CPU/ONNX), and Piper (CPU/ONNX, 15+ languages). All inference runs locally — no cloud APIs.
+A lightweight, production-ready local TTS server with **five local engines**: Kokoro-82M (GPU-accelerated on an NVIDIA GTX 1060 with automatic CPU fallback), Thai Vachana (PyThaiTTS, CPU/ONNX), Thai MMS (Meta, GPU), Thai Thonburian (F5-TTS Mega, GPU), and Piper (CPU/ONNX, 15+ languages). All inference runs locally — no cloud APIs.
 
 Serves a REST API compatible with typical `/v1/audio/speech` patterns. Containerised with Docker for easy deployment.
 
@@ -40,7 +40,7 @@ Generate speech from text.
 | `text` | string | (required) | Text to synthesise |
 | `voice` | string | `"af_heart"` | Voice ID (see `/voices` per engine) |
 | `speed` | number | `1.0` | Speaking speed |
-| `engine` | string | `"kokoro"` | `kokoro` \| `thai` \| `piper` |
+| `engine` | string | `"kokoro"` | `kokoro` \| `thai` \| `piper` \| `mms` \| `f5` |
 
 **Response:** WAV audio (`audio/wav`), 16-bit mono. Sample rate is engine-dependent (Kokoro 24 kHz, Thai/Piper 22.05 kHz).
 
@@ -53,7 +53,7 @@ Health check — returns `{"status": "ok"}`.
 List voices for an engine:
 
 ```
-GET /voices?engine=kokoro | thai | piper
+GET /voices?engine=kokoro | thai | piper | mms | f5
 ```
 
 Returns a JSON array of `{"id", "name", "language"}` objects (language omitted for Kokoro).
@@ -105,16 +105,33 @@ Serve any media file with the correct MIME type for playback or download.
 |---|---|---|---|---|
 | **Kokoro-82M** | `kokoro` | GPU (GTX 1060), CPU fallback | English | ~150, curated list below |
 | **Thai Vachana** (PyThaiTTS) | `thai` | CPU (ONNX) | Thai | `th_f_1`, `th_f_2`, `th_m_1`, `th_m_2` |
+| **Thai MMS** (Meta) | `mms` | GPU | Thai | `facebook/mms-tts-tha` (16 kHz) |
+| **Thai Thonburian** (F5-TTS Mega) | `f5` | GPU | Thai | `default` (auto-built ref voice, 24 kHz) |
 | **Piper** | `piper` | CPU (ONNX) | 15+ (EN, DE, FR, ES, IT, PT, RU, UK, VI, AR, ZH, NL, PL, TR, …) | curated list in `/voices` |
 
-The web UI exposes an **Engine** dropdown next to the voice picker; voice lists load from `/voices?engine=…`.
+The web UI exposes an **Engine** dropdown next to the voice picker; voice lists load from `/voices?engine=…`. Thai engines, best quality first: **Thonburian `f5`** (natural prosody, diffusion) → **MMS `mms`** (stable VITS) → **Vachana `thai`** (fast CPU).
 
 **First-use downloads** (persisted, see Persistent Storage):
 - Kokoro: model weights (~300 MB) via the HuggingFace cache
 - Piper: `piper_models/<voice>.onnx` (~60 MB each) from `rhasspy/piper-voices`
 - Thai: `pythai_voices/<voice>.onnx` (~60 MB each) from `VIZINTZOR/VachanaTTS`
+- MMS: `facebook/mms-tts-tha` (~145 MB) via the HuggingFace cache
+- Thonburian: `f5_models/mega_f5_last.safetensors` (**1.35 GB**) + auto-built ref voice
 
 ### curl examples
+
+```bash
+# Thai — best quality (Thonburian F5)
+curl -X POST "http://localhost:8001/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "สวัสดีครับ", "engine": "f5", "voice": "default"}' \
+  --output thai_best.wav
+
+# Thai — fast (Meta MMS)
+curl -X POST "http://localhost:8001/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "สวัสดีครับ", "engine": "mms", "voice": "facebook/mms-tts-tha"}' \
+  --output thai_mms.wav
 
 ```bash
 # Thai
@@ -189,6 +206,7 @@ ports:
 | Audio output | `./output` | `/app/output` | Generated WAV files survive rebuilds, accessible from host |
 | Piper voices | `./piper_models` | `/app/piper_models` | Piper ONNX voices (~60 MB each) |
 | Thai voices | `./pythai_voices` | `/app/voices` | Thai Vachana ONNX voices (~60 MB each) |
+| Thonburian models | `./f5_models` | `/app/f5_models` | F5-TTS Mega checkpoint (1.35 GB) + ref voice |
 
 To clear the model cache and force a fresh download:
 
@@ -248,6 +266,7 @@ Kokoro-82M itself needs only ~1 GiB VRAM, so GPU OOM is unlikely unless other pr
 ├── output/              # Generated WAV files (gitignored)
 ├── piper_models/        # Downloaded Piper ONNX voices (gitignored)
 ├── pythai_voices/       # Downloaded Thai Vachana ONNX voices (gitignored)
+├── f5_models/           # Downloaded Thonburian F5 checkpoint (gitignored)
 ├── .gitignore
 ├── README.md            # This file
 ├── AGENTS.md            # AI assistant context

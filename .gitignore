@@ -5,3 +5,4 @@ output/
 # Downloaded model voices (Piper ONNX, Thai Vachana)
 piper_models/
 pythai_voices/
+f5_models/

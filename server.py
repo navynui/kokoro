@@ -67,7 +67,12 @@ STATIC_DIR.mkdir(exist_ok=True)
 # kokoro (GPU, default) | thai (PyThaiTTS/VachanaTTS2, CPU) | piper (CPU)
 
 PIPER_DIR = BASE_DIR / "piper_models"
+F5_DIR = BASE_DIR / "f5_models"
 PIPER_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+F5_CHECKPOINT = "https://huggingface.co/biodatlab/ThonburianTTS/resolve/main/megaF5/mega_f5_last.safetensors"
+F5_VOCAB = "https://huggingface.co/biodatlab/ThonburianTTS/resolve/main/megaF5/mega_vocab.txt"
+# Text spoken by the auto-built default reference voice (F5 clones this)
+F5_REF_TEXT = "สวัสดีครับ ยินดีที่ได้รู้จัก"
 
 KOKORO_VOICES = [
     {"id": "af_heart", "name": "Heart (warm female)"},
@@ -86,6 +91,14 @@ THAI_VOICES = [
     {"id": "th_f_2", "name": "Female 2", "language": "Thai"},
     {"id": "th_m_1", "name": "Male 1", "language": "Thai"},
     {"id": "th_m_2", "name": "Male 2", "language": "Thai"},
+]
+
+MMS_VOICES = [
+    {"id": "facebook/mms-tts-tha", "name": "Meta MMS Thai", "language": "Thai"},
+]
+
+F5_VOICES = [
+    {"id": "default", "name": "Default (auto-built ref voice)", "language": "Thai"},
 ]
 
 PIPER_VOICES = [
@@ -171,6 +184,75 @@ def get_pythai():
                 _pythai = PyThaiTTS(pretrained="vachana")
     return _pythai
 
+
+_mms_lock = threading.Lock()
+_mms = None
+
+
+def get_mms():
+    """Lazy singleton for Meta MMS-TTS Thai (transformers VITS, GPU if available)."""
+    global _mms
+    if _mms is None:
+        with _mms_lock:
+            if _mms is None:
+                from transformers import VitsModel, AutoTokenizer
+                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                print(f"[server] Initializing MMS-TTS (mms-tts-tha) on {device}…")
+                _mms = {
+                    "model": VitsModel.from_pretrained("facebook/mms-tts-tha").to(device),
+                    "tok": AutoTokenizer.from_pretrained("facebook/mms-tts-tha"),
+                    "device": device,
+                }
+    return _mms
+
+
+_f5_lock = threading.Lock()
+_f5 = None
+
+
+def _make_f5_ref_voice(ref: Path) -> None:
+    """Synthesize a short Thai reference clip with MMS so F5 can clone it."""
+    print("[server] Building default F5 reference voice (via MMS)…")
+    mms = get_mms()
+    model, tok, device = mms["model"], mms["tok"], mms["device"]
+    inputs = tok(F5_REF_TEXT, return_tensors="pt").to(device)
+    with torch.no_grad():
+        wave = model(**inputs).waveform[0].cpu().numpy()
+    sf.write(str(ref), wave, model.config.sampling_rate)
+
+
+def get_f5():
+    """Lazy singleton for ThonburianTTS (F5-TTS Mega, GPU)."""
+    global _f5
+    if _f5 is None:
+        with _f5_lock:
+            if _f5 is None:
+                from flowtts.inference import FlowTTSPipeline, ModelConfig, AudioConfig
+                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                F5_DIR.mkdir(parents=True, exist_ok=True)
+                ckpt = F5_DIR / "mega_f5_last.safetensors"
+                vocab = F5_DIR / "mega_vocab.txt"
+                ref = F5_DIR / "ref_voice.wav"
+                _download(F5_CHECKPOINT, ckpt)
+                _download(F5_VOCAB, vocab)
+                if not ref.exists():
+                    _make_f5_ref_voice(ref)
+                print(f"[server] Initializing ThonburianTTS (F5 Mega) on {device}…")
+                model_config = ModelConfig(
+                    language="th",
+                    model_type="F5",
+                    checkpoint=str(ckpt),
+                    vocab_file=str(vocab),
+                    device=device,
+                )
+                pipeline = FlowTTSPipeline(
+                    model_config=model_config,
+                    audio_config=AudioConfig(),
+                    temp_dir=str(F5_DIR / "temp"),
+                )
+                _f5 = {"pipeline": pipeline, "ref": str(ref), "ref_text": F5_REF_TEXT}
+    return _f5
+
 # Media types we recognise
 MEDIA_EXTENSIONS = {
     ".wav": "audio/wav",
@@ -224,7 +306,7 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = "af_heart"
     speed: float = 1.0
-    engine: Literal["kokoro", "thai", "piper"] = "kokoro"
+    engine: Literal["kokoro", "thai", "piper", "mms", "f5"] = "kokoro"
 
 
 # ── Web UI ──────────────────────────────────────────────────────────────
@@ -278,6 +360,10 @@ async def list_voices(engine: str = "kokoro"):
         return KOKORO_VOICES
     if engine == "thai":
         return THAI_VOICES
+    if engine == "mms":
+        return MMS_VOICES
+    if engine == "f5":
+        return F5_VOICES
     if engine == "piper":
         return PIPER_VOICES
     raise HTTPException(status_code=422, detail=f"Unknown engine: {engine}")
@@ -331,6 +417,30 @@ def _generate_piper(request: TTSRequest, out_path: Path) -> None:
     sf.write(str(out_path), audio, chunks[0].sample_rate)
 
 
+def _generate_mms(request: TTSRequest, out_path: Path) -> None:
+    mms = get_mms()
+    model, tok, device = mms["model"], mms["tok"], mms["device"]
+    inputs = tok(request.text, return_tensors="pt").to(device)
+    with torch.no_grad():
+        waveform = model(**inputs).waveform[0].cpu().numpy()
+    if waveform.size == 0:
+        raise HTTPException(status_code=500, detail="MMS produced no audio")
+    sf.write(str(out_path), waveform, model.config.sampling_rate)
+
+
+def _generate_f5(request: TTSRequest, out_path: Path) -> None:
+    f5 = get_f5()
+    f5["pipeline"](
+        text=request.text,
+        ref_voice=f5["ref"],
+        ref_text=f5["ref_text"],
+        output_file=str(out_path),
+        speed=request.speed,
+    )
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail="F5 produced no audio")
+
+
 def _is_oom(e: Exception) -> bool:
     return isinstance(e, RuntimeError) and "out of memory" in str(e).lower()
 
@@ -346,6 +456,10 @@ async def generate_speech(request: TTSRequest):
             sf.write(str(out_path), combined, 24000)
         elif request.engine == "thai":
             _generate_thai(request, out_path)
+        elif request.engine == "mms":
+            _generate_mms(request, out_path)
+        elif request.engine == "f5":
+            _generate_f5(request, out_path)
         else:  # piper
             _generate_piper(request, out_path)
     except Exception as e:
