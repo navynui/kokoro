@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from kokoro import KPipeline
+import torch
+import threading
 import soundfile as sf
 import numpy as np
 import uuid
@@ -11,12 +13,44 @@ app = FastAPI(title="Kokoro TTS Server", version="1.2.0")
 
 # Lazy init — model downloads on first request, not at import time
 pipeline: KPipeline | None = None
+_pipeline_lock = threading.Lock()
+
+# Kokoro-82M needs roughly 1 GiB VRAM. If less than this is free, prefer
+# CPU instead of risking a CUDA out-of-memory error.
+MIN_FREE_VRAM = 1.5 * 1024 ** 3  # 1.5 GiB
+
+
+def _pick_device() -> str:
+    """Pick cuda only when a GPU is present with enough free VRAM."""
+    if not torch.cuda.is_available():
+        return 'cpu'
+    free, _total = torch.cuda.mem_get_info()
+    if free < MIN_FREE_VRAM:
+        print(
+            f"[server] Only {free / 1024**3:.2f} GiB VRAM free on "
+            f"{torch.cuda.get_device_name(0)}; using CPU instead"
+        )
+        return 'cpu'
+    return 'cuda'
+
+
+def _build_pipeline(device: str) -> KPipeline:
+    print(f"[server] Initializing KPipeline on device: {device}")
+    try:
+        return KPipeline(lang_code='a', device=device)
+    except RuntimeError:
+        if device != 'cuda':
+            raise
+        print("[server] CUDA init failed (likely not enough VRAM); falling back to CPU")
+        return KPipeline(lang_code='a', device='cpu')
 
 
 def get_pipeline() -> KPipeline:
     global pipeline
     if pipeline is None:
-        pipeline = KPipeline(lang_code='a')
+        with _pipeline_lock:
+            if pipeline is None:
+                pipeline = _build_pipeline(_pick_device())
     return pipeline
 
 
@@ -125,37 +159,53 @@ async def health():
     return {"status": "ok"}
 
 
+def _generate_audio(pipe: KPipeline, request: TTSRequest) -> np.ndarray:
+    generator = pipe(
+        request.text,
+        voice=request.voice,
+        speed=request.speed,
+        split_pattern=r'\n+',
+    )
+
+    all_audio = []
+    for _, _, audio in generator:
+        if audio is not None and len(audio) > 0:
+            all_audio.append(audio)
+
+    if not all_audio:
+        raise HTTPException(status_code=500, detail="No audio generated")
+
+    return np.concatenate(all_audio)
+
+
+def _is_oom(e: Exception) -> bool:
+    return isinstance(e, RuntimeError) and "out of memory" in str(e).lower()
+
+
 @app.post("/v1/audio/speech")
 async def generate_speech(request: TTSRequest):
     try:
-        pipe = get_pipeline()
-        generator = pipe(
-            request.text,
-            voice=request.voice,
-            speed=request.speed,
-            split_pattern=r'\n+',
-        )
-
-        all_audio = []
-        for _, _, audio in generator:
-            if audio is not None and len(audio) > 0:
-                all_audio.append(audio)
-
-        if not all_audio:
-            raise HTTPException(status_code=500, detail="No audio generated")
-
-        combined = np.concatenate(all_audio)
-
-        out_id = uuid.uuid4().hex[:12]
-        out_path = OUTPUT_DIR / f"{out_id}.wav"
-        sf.write(str(out_path), combined, 24000)
-
-        return FileResponse(
-            str(out_path),
-            media_type="audio/wav",
-            filename="speech.wav",
-            headers={"X-Audio-Filename": f"{out_id}.wav"},
-        )
-
+        combined = _generate_audio(get_pipeline(), request)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        if not _is_oom(e):
+            raise HTTPException(status_code=500, detail=str(e))
+        # VRAM exhausted mid-generation — rebuild on CPU and retry once.
+        global pipeline
+        print("[server] CUDA out of memory during generation; falling back to CPU")
+        with _pipeline_lock:
+            pipeline = _build_pipeline('cpu')
+        try:
+            combined = _generate_audio(get_pipeline(), request)
+        except Exception as e2:
+            raise HTTPException(status_code=500, detail=str(e2))
+
+    out_id = uuid.uuid4().hex[:12]
+    out_path = OUTPUT_DIR / f"{out_id}.wav"
+    sf.write(str(out_path), combined, 24000)
+
+    return FileResponse(
+        str(out_path),
+        media_type="audio/wav",
+        filename="speech.wav",
+        headers={"X-Audio-Filename": f"{out_id}.wav"},
+    )

@@ -1,6 +1,6 @@
 # Kokoro TTS Server
 
-A lightweight, production-ready local TTS server using [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) — a fast, high-quality text-to-speech model that runs comfortably on CPU.
+A lightweight, production-ready local TTS server using [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) — a fast, high-quality text-to-speech model. Runs GPU-accelerated on an NVIDIA GTX 1060 when available, with automatic CPU fallback.
 
 Serves a REST API compatible with typical `/v1/audio/speech` patterns. Containerised with Docker for easy deployment.
 
@@ -160,7 +160,36 @@ rm -f output/*.wav
 
 ### GPU Acceleration
 
-If you free up GPU headroom, uncomment the `deploy` block in `docker-compose.yml` to use the NVIDIA GPU. Kokoro will automatically pick it up — no code changes needed.
+This server runs Kokoro on the host's **NVIDIA GTX 1060 (6 GB)** when available, and falls back to CPU automatically if the GPU is missing or short on VRAM.
+
+**How it's configured:**
+
+- `docker-compose.yml` pins the GTX 1060 by UUID via a Docker device reservation:
+
+  ```yaml
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids:
+              - GPU-ebd852dc-b885-2874-feb2-1b37c939588b  # GTX 1060
+            capabilities: [gpu]
+  ```
+
+  To target a different GPU, replace the UUID (find yours with `nvidia-smi --query-gpu=index,name,uuid --format=csv`). Only the pinned GPU is exposed to the container.
+
+- `Dockerfile` pins `torch==2.7.1+cu126` from the [PyTorch index](https://download.pytorch.org/whl/cu126). Newer PyPI torch builds (cu13x) dropped kernels for Pascal (sm_61), which the GTX 1060 requires.
+
+**Host requirements:** NVIDIA driver plus the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (`nvidia-smi` must work on the host).
+
+**Automatic CPU fallback:** `server.py` selects the device at startup and guards against VRAM exhaustion:
+
+1. **Low VRAM at startup** — if less than **1.5 GiB** is free, the model loads on CPU (`MIN_FREE_VRAM` in `server.py`).
+2. **Init failure** — if CUDA model loading fails (e.g., OOM while loading weights), it retries on CPU.
+3. **Mid-generation OOM** — if a request runs out of VRAM during synthesis, the server rebuilds the pipeline on CPU and retries that request; subsequent requests stay on CPU to avoid thrashing between devices.
+
+Kokoro-82M itself needs only ~1 GiB VRAM, so GPU OOM is unlikely unless other processes are using the card.
 
 ## Project Structure
 
@@ -187,7 +216,7 @@ docker compose -f ~/dev/kokoro/docker-compose.yml down
 ## Why Kokoro?
 
 - **82M parameters** (~300 MB) — tiny compared to Bark's ~1.2B
-- **Runs on CPU** — real-time inference with no GPU required
+- **GPU-accelerated** — runs on the GTX 1060 when available, falls back to CPU automatically
 - **Near-commercial quality** — competitive with cloud TTS
 - **~50–100× faster than real-time** on modern CPUs
-- **Simple Docker deployment** — no CUDA runtime needed
+- **Simple Docker deployment** — single container; torch bundles the CUDA runtime, host needs the NVIDIA container toolkit

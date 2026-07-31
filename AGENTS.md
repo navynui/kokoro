@@ -6,14 +6,14 @@
 - **Path:** `~/dev/kokoro/`
 - **Purpose:** Lightweight local TTS server via Docker, exposing a FastAPI REST endpoint backed by Kokoro-82M.
 - **Stack:** Python 3.11, FastAPI, Uvicorn, Kokoro-82M, Docker Compose.
-- **GPU:** Tesla P100 available on host but **not used by this container** (VRAM saturated at ~95%). Kokoro runs on CPU comfortably.
+- **GPU:** Pinned to the host's NVIDIA GTX 1060 6GB (`GPU-ebd852dc-b885-2874-feb2-1b37c939588b`) via Docker device reservation. Torch is pinned to `2.7.1+cu126` because newer builds dropped Pascal (sm_61) kernels. The Tesla P100 on the host is left untouched. Automatic CPU fallback when VRAM is insufficient (see Constraints & Notes).
 
 ## Key Files
 
 | File | Role |
 |---|---|
 | `docker-compose.yml` | Single service `tts`, maps host `8001` → container `8000`. Mounts `~/.cache/huggingface` (model cache) and `./output` (audio files). |
-| `Dockerfile` | `python:3.11-slim` base. Pins `kokoro>=0.9.2`, `fastapi>=0.115.0`, `uvicorn[standard]>=0.34.0`, `soundfile`, `numpy`. |
+| `Dockerfile` | `python:3.11-slim` base. Pins `torch==2.7.1+cu126` (Pascal-compatible, from the PyTorch cu126 index) before installing `kokoro>=0.9.2`, `fastapi>=0.115.0`, `uvicorn[standard]>=0.34.0`, `soundfile`, `numpy`. |
 | `server.py` | FastAPI app. Serves web UI, audio file listing, and TTS endpoint. Lazy-init `KPipeline`. |
 | `static/index.html` | Single-page web UI with TTS form, inline player, file browser with play/download/share. Mobile-responsive. |
 | `.gitignore` | Ignores `output/` and `*.wav` |
@@ -101,6 +101,7 @@ Serves the web UI (`static/index.html`). The UI renders audio files with `<audio
 ## Dependency Graph (pip)
 
 ```
+torch == 2.7.1+cu126   # from https://download.pytorch.org/whl/cu126 (Pascal sm_61 support)
 fastapi >= 0.115.0
 uvicorn[standard] >= 0.34.0
 kokoro >= 0.9.2
@@ -108,7 +109,7 @@ soundfile >= 0.13.0
 numpy >= 1.26.0
 ```
 
-Kokoro pulls in torch, transformers, spaCy (en_core_web_sm), and misaki. No additional system deps needed.
+Kokoro pulls in transformers, spaCy (en_core_web_sm), and misaki. Torch bundles its own CUDA 12.6 runtime, so no additional system deps are needed — but the host must have the NVIDIA driver + container toolkit installed.
 
 ## Common Tasks
 
@@ -165,7 +166,8 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 
 - **Lazy init:** First request takes ~10–30s (model download + spaCy model install). Subsequent requests are < 1s.
 - **No auth:** Server has no authentication. Use a reverse proxy (nginx/Caddy) if exposing outside localhost or the internet.
-- **GPU not wired:** Container intentionally avoids `--gpus` to keep the image small and avoid CUDA dependency. Kokoro is fast enough on CPU.
+- **GPU wired:** The container requests the host's GTX 1060 (Pascal sm_61) via `deploy.resources.reservations.devices` pinned by UUID. Torch is pinned to `2.7.1+cu126` — newer PyPI torch builds (cu13x) dropped sm_61 kernels. First request still takes ~10–30s for model load; subsequent requests are faster on GPU.
+- **CPU fallback (automatic):** `server.py` guards against missing/low VRAM in three ways — (1) `_pick_device()` checks `torch.cuda.mem_get_info()` and uses CPU if free VRAM < `MIN_FREE_VRAM` (1.5 GiB); (2) `_build_pipeline()` retries on CPU if CUDA init raises; (3) `_generate_audio()` catches mid-generation CUDA OOM, rebuilds the pipeline on CPU, and retries the request once (subsequent requests stay on CPU to avoid thrashing).
 - **Single worker:** Uvicorn runs without `--workers` to keep things simple.
 - **Host port 8001** is used because something else is on 8000.
 - **Model cache persisted** via `~/.cache/huggingface` volume mount.

@@ -8,11 +8,13 @@ services:
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
       - ./output:/app/output
-    # Uncomment the next two lines if you free up GPU headroom later:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Pin the GTX 1060 (host GPU index 1). Other GPUs on this host
+              # (e.g. Tesla P100) stay untouched.
+              device_ids:
+                - GPU-ebd852dc-b885-2874-feb2-1b37c939588b
+              capabilities: [gpu]
