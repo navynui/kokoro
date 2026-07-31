@@ -15,12 +15,12 @@ Generate speech from text using five local TTS engines — Kokoro-82M (GPU), Tha
 
 ## Background
 
-The server wraps five local engines in a FastAPI server inside Docker: **Kokoro-82M** (GPU-accelerated on a GTX 1060, English, ~150 voices), **Thai Vachana** (PyThaiTTS VachanaTTS2, VITS-ONNX on CPU, 4 Thai voices), **Thai MMS** (Meta `mms-tts-tha`, GPU, 16 kHz), **Thai Thonburian** (F5-TTS Mega, GPU, best Thai quality, 24 kHz), and **Piper** (ONNX on CPU, 15+ languages). All inference runs locally. The server also serves a mobile-responsive web UI with an engine/voice picker for generating, playing, browsing, downloading, and sharing audio files.
+The server wraps five local engines in a FastAPI server inside Docker: **Kokoro-82M** (GPU — Tesla P100 preferred → GTX 1060 → CPU fallback, English, ~150 voices), **Thai Vachana** (PyThaiTTS VachanaTTS2, VITS-ONNX on CPU, 4 Thai voices), **Thai MMS** (Meta `mms-tts-tha`, GPU, 16 kHz), **Thai Thonburian** (F5-TTS Mega, GPU, best Thai quality, 24 kHz), and **Piper** (ONNX on CPU, 15+ languages). All inference runs locally. The server also serves a mobile-responsive web UI with an engine/voice picker for generating, playing, browsing, downloading, and sharing audio files. GPU models are unloaded from VRAM after `IDLE_UNLOAD_MINUTES` (default 10) of no API/web activity and re-initialize on the next request.
 
 - **Server URL:** `http://localhost:8001` (or host LAN IP from other devices)
-- **Audio format:** 16-bit mono WAV — 24 kHz (Kokoro), 22.05 kHz (Thai/Piper)
+- **Audio format:** 16-bit mono WAV — 24 kHz (Kokoro/F5), 22.05 kHz (Thai/Piper), 16 kHz (MMS)
 - **Model cache:** Persisted at `~/.cache/huggingface` (volume mount)
-- **Voice models:** `~/dev/kokoro/piper_models/` and `~/dev/kokoro/pythai_voices/` (volume mounts, gitignored)
+- **Voice models:** `~/dev/kokoro/piper_models/`, `~/dev/kokoro/pythai_voices/`, `~/dev/kokoro/f5_models/` (volume mounts, gitignored)
 - **Output dir:** `~/dev/kokoro/output/` (volume mount, gitignored)
 
 ## API Endpoints
@@ -45,9 +45,9 @@ Generate speech from text.
 | `text` | string | (required) | Text to synthesise |
 | `voice` | string | `"af_heart"` | Voice ID (see `/voices` per engine) |
 | `speed` | number | `1.0` | Speaking speed (0.5–2.0) |
-| `engine` | string | `"kokoro"` | `kokoro` \| `thai` \| `piper` |
+| `engine` | string | `"kokoro"` | `kokoro` \| `thai` \| `piper` \| `mms` \| `f5` |
 
-**Response:** `200 audio/wav` (binary) with header `X-Audio-Filename: <uuid>.wav`. Sample rate is engine-dependent (24 kHz Kokoro, 22.05 kHz Thai/Piper).
+**Response:** `200 audio/wav` (binary) with header `X-Audio-Filename: <uuid>.wav`. Sample rate is engine-dependent (24 kHz Kokoro/F5, 22.05 kHz Thai/Piper, 16 kHz MMS).
 
 **Error:** `500 {"detail": "..."}` (or `422` for an unknown engine)
 
@@ -61,7 +61,7 @@ Generate speech from text.
 | `f5` | ✅ | ✅ | `default` (best quality, diffusion, 24 kHz, slowest ~4s) |
 | `piper` | ❌ | ✅ | 15 curated, e.g. `en_US-lessac-medium` |
 
-First use of each engine downloads its model (~60–300 MB); subsequent requests are fast and fully offline.
+First use of each engine downloads its model (Kokoro ~300 MB, Piper/Thai ~60 MB, MMS ~145 MB, F5 **1.35 GB**); subsequent requests are fast and fully offline. GPU idle-unload: after `IDLE_UNLOAD_MINUTES` (default 10, `0` disables) with no requests, GPU models are dropped from VRAM and re-initialize on the next request (~1–3s).
 
 ### `POST /v1/audio/speech` (curl)
 
@@ -78,7 +78,7 @@ Returns `{"status": "ok"}`.
 
 ### `GET /voices`
 
-Lists voices for an engine: `GET /voices?engine=kokoro|thai|piper`. Returns `[{"id", "name", "language"}]`; unknown engine → `422`.
+Lists voices for an engine: `GET /voices?engine=kokoro|thai|piper|mms|f5`. Returns `[{"id", "name", "language"}]`; unknown engine → `422`.
 
 ### `GET /`
 
@@ -141,9 +141,17 @@ Common voices (150+ available):
 
 Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`/`f` = male/female. The full list is served by `GET /voices?engine=kokoro`.
 
-### Thai (engine `thai`)
+### Thai Vachana (engine `thai`)
 
-`th_f_1`, `th_f_2` (female), `th_m_1`, `th_m_2` (male). Text is preprocessed automatically (digits → Thai words, `ๆ` expansion).
+`th_f_1`, `th_f_2` (female), `th_m_1`, `th_m_2` (male). Text is preprocessed automatically (digits → Thai words, `ๆ` expansion). Fast CPU inference.
+
+### Thai MMS (engine `mms`)
+
+Meta's VITS model, `facebook/mms-tts-tha` (16 kHz). Single voice; fast (~0.3s GPU), stable. Good default for quick Thai clips.
+
+### Thai Thonburian (engine `f5`)
+
+Best Thai quality — F5-TTS Mega, diffusion-based, 24 kHz, GPU (~2.2s per sentence on P100, ~4.4s on 1060). Single voice `default`; the reference voice is auto-built from `F5_REF_TEXT` via MMS on first use (so no external ref audio or ASR is needed).
 
 ### Piper (engine `piper`)
 
@@ -162,13 +170,26 @@ curl -s -X POST "http://localhost:8001/v1/audio/speech" \
 
 After generation, the file also appears in `~/dev/kokoro/output/` with a UUID filename. The response header `X-Audio-Filename` contains the filename.
 
-### 1b. Generate Thai speech (engine `thai`)
+### 1b. Generate Thai speech
 
 ```bash
+# Fast — Vachana (CPU)
 curl -s -X POST "http://localhost:8001/v1/audio/speech" \
   -H "Content-Type: application/json" \
   -d '{"text": "สวัสดีครับ", "voice": "th_f_1", "engine": "thai"}' \
   --output /tmp/thai.wav
+
+# Fast GPU — Meta MMS (16 kHz)
+curl -s -X POST "http://localhost:8001/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "สวัสดีครับ", "voice": "facebook/mms-tts-tha", "engine": "mms"}' \
+  --output /tmp/thai_mms.wav
+
+# Best quality — Thonburian F5 (24 kHz, first use downloads 1.35 GB)
+curl -s -X POST "http://localhost:8001/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "สวัสดีครับ", "voice": "default", "engine": "f5"}' \
+  --output /tmp/thai_best.wav
 ```
 
 ### 2. List all generated files
@@ -233,7 +254,8 @@ If the Kokoro server and HyperFrames renderer are on the same Docker network, us
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| First use of an engine takes 10–60s | Model downloading (Kokoro ~300 MB; Piper/Thai ~60 MB per voice) | Normal — subsequent requests are < 1s |
+| First use of an engine takes 10s–several minutes | Model downloading (Kokoro ~300 MB; Piper/Thai ~60 MB; MMS ~145 MB; F5 1.35 GB) | Normal — subsequent requests are fast (F5 ~2–4s, MMS < 1s) |
+| GPU models unload after idle | `IDLE_UNLOAD_MINUTES` (default 10) expired with no requests | Expected — next request re-initializes from disk (~1–3s); raise/disable via compose env |
 | `index.html not found` | Static files not in image | Rebuild: `docker compose up -d --build` |
 | Port conflict | Port 8001 already in use | Check with `ss -tlnp \| grep 8001` |
 | Permission denied on `output/` | Volume mount ownership | `sudo chown -R $USER:$USER ~/dev/kokoro/output` |
@@ -242,6 +264,6 @@ If the Kokoro server and HyperFrames renderer are on the same Docker network, us
 ## Project State
 
 - **Path:** `~/dev/kokoro/`
-- **Key files:** `server.py`, `static/index.html`, `docker-compose.yml`, `Dockerfile`, `.gitignore`, `README.md`, `AGENTS.md`, `SKILL.md`, `output/`, `piper_models/`, `pythai_voices/` (last three gitignored)
+- **Key files:** `server.py`, `static/index.html`, `docker-compose.yml`, `Dockerfile`, `.gitignore`, `README.md`, `AGENTS.md`, `SKILL.md`, `output/`, `piper_models/`, `pythai_voices/`, `f5_models/` (last four gitignored)
 - **Default branch:** `main`
 - **Remote:** `git@github.com:navynui/kokoro.git`
