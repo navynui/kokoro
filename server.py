@@ -36,14 +36,15 @@ def _touch_activity() -> None:
 
 def _unload_gpu_models() -> None:
     """Drop GPU singletons so VRAM is released; next request re-initializes."""
-    global pipeline, _mms, _f5
+    global pipeline, _mms, _f5, _jaitts
     with _unload_lock:
-        if pipeline is None and _mms is None and _f5 is None:
+        if pipeline is None and _mms is None and _f5 is None and _jaitts is None:
             return
         print(f"[server] Idle > {IDLE_UNLOAD_MINUTES:.0f} min — unloading GPU models from VRAM")
         pipeline = None
         _mms = None
         _f5 = None
+        _jaitts = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -140,6 +141,10 @@ F5_VOCAB = "https://huggingface.co/biodatlab/ThonburianTTS/resolve/main/megaF5/m
 # Text spoken by the auto-built default reference voice (F5 clones this)
 F5_REF_TEXT = "สวัสดีครับ ยินดีที่ได้รู้จัก"
 
+JAITTS_DIR = BASE_DIR / "jaitts_models"
+JAITTS_CHECKPOINT = "https://huggingface.co/JTS-AI/JaiTTS-F5TTS/resolve/main/model.pt"
+JAITTS_VOCAB = "https://huggingface.co/JTS-AI/JaiTTS-F5TTS/resolve/main/vocab.txt"
+
 KOKORO_VOICES = [
     {"id": "af_heart", "name": "Heart (warm female)"},
     {"id": "af_bella", "name": "Bella (bright female)"},
@@ -164,6 +169,10 @@ MMS_VOICES = [
 ]
 
 F5_VOICES = [
+    {"id": "default", "name": "Default (auto-built ref voice)", "language": "Thai"},
+]
+
+JAITTS_VOICES = [
     {"id": "default", "name": "Default (auto-built ref voice)", "language": "Thai"},
 ]
 
@@ -319,6 +328,44 @@ def get_f5():
                 _f5 = {"pipeline": pipeline, "ref": str(ref), "ref_text": F5_REF_TEXT}
     return _f5
 
+
+_jaitts_lock = threading.Lock()
+_jaitts = None
+
+
+def get_jaitts():
+    """Lazy singleton for JaiTTS-F5TTS (Thai voice cloning, F5-TTS base, GPU)."""
+    global _jaitts
+    if _jaitts is None:
+        with _jaitts_lock:
+            if _jaitts is None:
+                from flowtts.inference import FlowTTSPipeline, ModelConfig, AudioConfig
+                device = _pick_device()
+                JAITTS_DIR.mkdir(parents=True, exist_ok=True)
+                ckpt = JAITTS_DIR / "model.pt"
+                vocab = JAITTS_DIR / "vocab.txt"
+                ref = JAITTS_DIR / "ref_voice.wav"
+                _download(JAITTS_CHECKPOINT, ckpt)
+                _download(JAITTS_VOCAB, vocab)
+                if not ref.exists():
+                    _make_f5_ref_voice(ref)
+                print(f"[server] Initializing JaiTTS-F5TTS on {device}…")
+                model_config = ModelConfig(
+                    language="th",
+                    model_type="F5",
+                    checkpoint=str(ckpt),
+                    vocab_file=str(vocab),
+                    device=device,
+                )
+                pipeline = FlowTTSPipeline(
+                    model_config=model_config,
+                    # JaiTTS paper/quickstart recommends cfg_strength=2.5
+                    audio_config=AudioConfig(cfg_strength=2.5),
+                    temp_dir=str(JAITTS_DIR / "temp"),
+                )
+                _jaitts = {"pipeline": pipeline, "ref": str(ref), "ref_text": F5_REF_TEXT}
+    return _jaitts
+
 # Media types we recognise
 MEDIA_EXTENSIONS = {
     ".wav": "audio/wav",
@@ -372,7 +419,7 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = "af_heart"
     speed: float = 1.0
-    engine: Literal["kokoro", "thai", "piper", "mms", "f5"] = "kokoro"
+    engine: Literal["kokoro", "thai", "piper", "mms", "f5", "jaitts"] = "kokoro"
 
 
 # ── Web UI ──────────────────────────────────────────────────────────────
@@ -430,6 +477,8 @@ async def list_voices(engine: str = "kokoro"):
         return MMS_VOICES
     if engine == "f5":
         return F5_VOICES
+    if engine == "jaitts":
+        return JAITTS_VOICES
     if engine == "piper":
         return PIPER_VOICES
     raise HTTPException(status_code=422, detail=f"Unknown engine: {engine}")
@@ -507,6 +556,19 @@ def _generate_f5(request: TTSRequest, out_path: Path) -> None:
         raise HTTPException(status_code=500, detail="F5 produced no audio")
 
 
+def _generate_jaitts(request: TTSRequest, out_path: Path) -> None:
+    j = get_jaitts()
+    j["pipeline"](
+        text=request.text,
+        ref_voice=j["ref"],
+        ref_text=j["ref_text"],
+        output_file=str(out_path),
+        speed=request.speed,
+    )
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail="JaiTTS produced no audio")
+
+
 def _is_oom(e: Exception) -> bool:
     return isinstance(e, RuntimeError) and "out of memory" in str(e).lower()
 
@@ -526,6 +588,8 @@ async def generate_speech(request: TTSRequest):
             _generate_mms(request, out_path)
         elif request.engine == "f5":
             _generate_f5(request, out_path)
+        elif request.engine == "jaitts":
+            _generate_jaitts(request, out_path)
         else:  # piper
             _generate_piper(request, out_path)
     except Exception as e:

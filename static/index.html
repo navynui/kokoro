@@ -112,6 +112,7 @@
           <option value="thai">ไทย Vachana (CPU)</option>
           <option value="mms">ไทย MMS (GPU)</option>
           <option value="f5">ไทย Thonburian F5 (GPU)</option>
+          <option value="jaitts">ไทย JaiTTS F5 (GPU)</option>
           <option value="piper">Piper (CPU)</option>
         </select>
       </div>
@@ -174,6 +175,7 @@ async function loadVoices() {
   if (engine === 'thai') voiceSelect.value = 'th_f_1';
   else if (engine === 'mms') voiceSelect.value = 'facebook/mms-tts-tha';
   else if (engine === 'f5') voiceSelect.value = 'default';
+  else if (engine === 'jaitts') voiceSelect.value = 'default';
   else if (engine === 'piper') voiceSelect.value = 'en_US-lessac-medium';
   else voiceSelect.value = 'af_bella';
 }

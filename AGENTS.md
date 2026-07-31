@@ -5,7 +5,7 @@
 - **Name:** Kokoro TTS Server
 - **Path:** `~/dev/kokoro/`
 - **Purpose:** Lightweight local TTS server via Docker, exposing a FastAPI REST endpoint backed by Kokoro-82M.
-- **Stack:** Python 3.11, FastAPI, Uvicorn, Kokoro-82M (GPU) + Thai Vachana/MMS/Thonburian-F5 (see Engines) + Piper (CPU), Docker Compose.
+- **Stack:** Python 3.11, FastAPI, Uvicorn, Kokoro-82M (GPU) + Thai Vachana/MMS/Thonburian-F5/JaiTTS-F5 (see Engines) + Piper (CPU), Docker Compose.
 - **GPU:** Both host GPUs are exposed to the container — Tesla P100 (cuda:0, preferred, fastest) and GTX 1060 (cuda:1). Device selection prefers P100 → 1060 → CPU (`_pick_device()` in server.py). Torch is pinned to `2.7.1+cu126` because newer builds dropped Pascal (sm_60/61) kernels. Automatic CPU fallback when VRAM is insufficient (see Constraints & Notes). Kokoro, MMS, and F5 use the GPU; Thai Vachana and Piper run on CPU (ONNX).
 
 ## Key Files
@@ -31,6 +31,7 @@ Browser ──POST /v1/audio/speech────> FastAPI ──> engine ──> 
                                                  └─ piper:   PiperVoice (CPU/ONNX)
   MMS (`mms`): transformers VitsModel (facebook/mms-tts-tha), 16 kHz, GPU.
   F5 (`f5`): ThonburianTTS FlowTTSPipeline (F5-TTS Mega), 24 kHz, GPU; auto-builds a default ref voice via MMS on first use.
+  JaiTTS (`jaitts`): JTS-AI JaiTTS-F5TTS checkpoint (same FlowTTSPipeline), 24 kHz, GPU; research prototype from the JaiTTS paper (better Thai CER than ThonburianTTS); shares the same ref-voice mechanism.
                                               Downloads model
                                               on first use
 ```
@@ -62,7 +63,7 @@ Request:
   "text": string       (required)
   "voice": string      (default "af_heart")
   "speed": float       (default 1.0)
-  "engine": string     (default "kokoro"; "kokoro" | "thai" | "piper" | "mms" | "f5")
+  "engine": string     (default "kokoro"; "kokoro" | "thai" | "piper" | "mms" | "f5" | "jaitts")
 }
 
 Headers (response):
@@ -78,7 +79,7 @@ Response: 200 audio/wav (binary) | 500 {"detail": "..."}
 ### `GET /voices`
 
 ```
-GET /voices?engine=kokoro|thai|piper|mms|f5
+GET /voices?engine=kokoro|thai|piper|mms|f5|jaitts
 Response: 200 [{"id", "name", "language"}, ...] | 422 unknown engine
 ```
 
@@ -187,9 +188,10 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - **No auth:** Server has no authentication. Use a reverse proxy (nginx/Caddy) if exposing outside localhost or the internet.
 - **GPU wired:** The container exposes both host GPUs via `deploy.resources.reservations.devices` — Tesla P100 (`GPU-37d0153e-32ad-2825-9300-de8903297fd1`, cuda:0) and GTX 1060 (`GPU-ebd852dc-b885-2874-feb2-1b37c939588b`, cuda:1). `_pick_device()` prefers the P100 (fastest) by name, then the 1060, then CPU, skipping devices with < `MIN_FREE_VRAM` free. Torch is pinned to `2.7.1+cu126` — newer PyPI torch builds (cu13x) dropped sm_60/61 kernels. F5 cached synthesis: ~2.2s on P100 (vs ~4.4s on 1060).
 - **CPU fallback (automatic):** `server.py` guards against missing/low VRAM in three ways — (1) `_pick_device()` checks `torch.cuda.mem_get_info()` and uses CPU if free VRAM < `MIN_FREE_VRAM` (1.5 GiB); (2) `_build_pipeline()` retries on CPU if CUDA init raises; (3) `_generate_kokoro()` catches mid-generation CUDA OOM, rebuilds the pipeline on CPU, and retries the request once (subsequent requests stay on CPU to avoid thrashing). Applies to the Kokoro engine only.
-- **Engines:** `engine` field on the API selects `kokoro` (GPU) / `thai` (PyThaiTTS VachanaTTS2, CPU/ONNX) / `piper` (Piper, CPU/ONNX) / `mms` (Meta MMS-TTS Thai, GPU, 16 kHz) / `f5` (ThonburianTTS F5-TTS Mega, GPU, 24 kHz, best Thai quality). All are lazy-loaded singletons. Piper voices download on first use from `rhasspy/piper-voices` (URL derived from voice id: `{lang}/{lang}_{dialect}/{name}/{quality}/{voice_id}.onnx`); Thai voices from `VIZINTZOR/VachanaTTS` (written by `vachanatts` to `/app/voices`). Thai text is preprocessed (digits → Thai words, ๆ expansion) before synthesis.
+- **Engines:** `engine` field on the API selects `kokoro` (GPU) / `thai` (PyThaiTTS VachanaTTS2, CPU/ONNX) / `piper` (Piper, CPU/ONNX) / `mms` (Meta MMS-TTS Thai, GPU, 16 kHz) / `f5` (ThonburianTTS F5-TTS Mega, GPU, 24 kHz) / `jaitts` (JTS-AI JaiTTS-F5TTS, GPU, 24 kHz; Thai voice-cloning research prototype with better Thai CER than `f5`). All are lazy-loaded singletons. Piper voices download on first use from `rhasspy/piper-voices` (URL derived from voice id: `{lang}/{lang}_{dialect}/{name}/{quality}/{voice_id}.onnx`); Thai voices from `VIZINTZOR/VachanaTTS` (written by `vachanatts` to `/app/voices`). Thai text is preprocessed (digits → Thai words, ๆ expansion) before synthesis.
 - **F5 specifics:** `./f5_models` holds the 1.35 GB `mega_f5_last.safetensors` + vocab + `ref_voice.wav`. The ref voice is synthesized once via MMS (`F5_REF_TEXT`) so the pipeline never triggers its whisper-based `transcribe()` (which would need a ~3 GB ASR model). F5 runs fp32 on the GTX 1060 (~1.6 GB VRAM, ~4 s/sentence cached). Requires `ffmpeg` (pydub).
-- **GPU idle unload:** GPU models (Kokoro, MMS, F5) are dropped from VRAM after `IDLE_UNLOAD_MINUTES` (default 10, set in docker-compose `environment`; `0` disables) with no API/web activity. A FastAPI middleware (`activity_middleware`) records activity + in-flight requests; a daemon thread polls every 30s and calls `_unload_gpu_models()` (drops singletons, `gc.collect()`, `torch.cuda.empty_cache()`). Re-init after unload is fast (weights on disk): F5 ~2s, MMS ~1s, Kokoro ~3s. CPU engines (Thai/Piper) stay loaded.
+- **JaiTTS specifics:** `./jaitts_models` holds the 1.35 GB `model.pt` + vocab from `JTS-AI/JaiTTS-F5TTS` (Apache 2.0). Same `flowtts` pipeline as `f5`; vocab is byte-identical to F5's, so it reuses the same char set and the same MMS-built ref voice (`F5_REF_TEXT`). Uses `AudioConfig(cfg_strength=2.5)` per the JaiTTS quickstart. The XLM-R duration-predictor variant from the paper is not released — only the base F5 checkpoint. Warm synthesis ~2.3s on P100.
+- **GPU idle unload:** GPU models (Kokoro, MMS, F5, JaiTTS) are dropped from VRAM after `IDLE_UNLOAD_MINUTES` (default 10, set in docker-compose `environment`; `0` disables) with no API/web activity. A FastAPI middleware (`activity_middleware`) records activity + in-flight requests; a daemon thread polls every 30s and calls `_unload_gpu_models()` (drops singletons, `gc.collect()`, `torch.cuda.empty_cache()`). Re-init after unload is fast (weights on disk): F5 ~2s, MMS ~1s, Kokoro ~3s. CPU engines (Thai/Piper) stay loaded.
 - **Single worker:** Uvicorn runs without `--workers` to keep things simple.
 - **Host port 8001** is used because something else is on 8000.
 - **Model cache persisted** via `~/.cache/huggingface` volume mount.
