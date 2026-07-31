@@ -142,16 +142,6 @@
 
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
-      <h2 style="font-size:1rem;font-weight:600;">Media Files</h2>
-      <button class="btn btn-sm btn-ghost" id="refresh-btn">⟳ Refresh</button>
-    </div>
-    <ul class="file-list" id="file-list">
-      <li class="empty">No files yet. Generate something!</li>
-    </ul>
-  </div>
-
-  <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
       <h2 style="font-size:1rem;font-weight:600;">🎙 Voice Cloning <span style="font-size:0.7rem;color:#94a3b8;font-weight:400;">(F5 / JaiTTS)</span></h2>
       <button class="btn btn-sm btn-ghost" id="ref-refresh-btn">⟳ Refresh</button>
     </div>
@@ -161,7 +151,7 @@
         <input type="text" id="ref-name" placeholder="e.g. my-voice" style="width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:0.6rem;font-size:0.9rem;">
       </div>
       <div style="flex:2;">
-        <label for="ref-text">Transcript of the clip (required)</label>
+        <label for="ref-text">Transcript of the clip (required — type exactly what is said)</label>
         <textarea id="ref-text" placeholder="Type exactly what the person says in the audio…" style="min-height:60px;"></textarea>
       </div>
     </div>
@@ -176,6 +166,16 @@
     </div>
     <ul class="file-list" id="ref-voice-list" style="margin-top:0.5rem;">
       <li class="empty">No registered voices. Upload a clip to clone it.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
+      <h2 style="font-size:1rem;font-weight:600;">Media Files</h2>
+      <button class="btn btn-sm btn-ghost" id="refresh-btn">⟳ Refresh</button>
+    </div>
+    <ul class="file-list" id="file-list">
+      <li class="empty">No files yet. Generate something!</li>
     </ul>
   </div>
 </div>
