@@ -1,7 +1,7 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
-from typing import Literal
+from typing import Literal, Optional
 from kokoro import KPipeline
 import torch
 import threading
@@ -13,9 +13,12 @@ import urllib.request
 import os
 import time
 import gc
+import json
+import io
+import re
 from pathlib import Path
 
-app = FastAPI(title="Kokoro TTS Server", version="1.4.0")
+app = FastAPI(title="Kokoro TTS Server", version="1.5.0")
 
 # ── GPU idle unload ─────────────────────────────────────────────────────
 # GPU models (Kokoro, MMS, F5) are dropped from VRAM after this many
@@ -129,6 +132,8 @@ OUTPUT_DIR = BASE_DIR / "output"
 STATIC_DIR = BASE_DIR / "static"
 OUTPUT_DIR.mkdir(exist_ok=True)
 STATIC_DIR.mkdir(exist_ok=True)
+REF_VOICES_DIR = BASE_DIR / "ref_voices"
+REF_VOICES_DIR.mkdir(exist_ok=True)
 
 # ── Engines ──────────────────────────────────────────────────────────────
 # kokoro (GPU, default) | thai (PyThaiTTS/VachanaTTS2, CPU) | piper (CPU)
@@ -366,6 +371,105 @@ def get_jaitts():
                 _jaitts = {"pipeline": pipeline, "ref": str(ref), "ref_text": F5_REF_TEXT}
     return _jaitts
 
+
+# ── Voice cloning (reference voices) ────────────────────────────────────
+# F5-family engines (f5, jaitts) clone a voice from a reference clip: the
+# pipeline is conditioned on (ref_wav, ref_text) instead of the built-in
+# MMS-built default. Registered voices live in REF_VOICES_DIR as
+# {name}.wav + {name}.json (transcript + provenance).
+
+MAX_REF_AUDIO_MB = 50
+_REF_NAME_RE = re.compile(r"[^0-9A-Za-z_\-\u0E00-\u0E7F]")
+
+
+def _safe_ref_name(name: str) -> str:
+    """Normalize a user-supplied voice name to a safe filesystem slug."""
+    name = _REF_NAME_RE.sub("", name.strip().replace(" ", "-"))
+    if not name or name in (".", "..") or name.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid voice name")
+    if len(name) > 64:
+        raise HTTPException(status_code=400, detail="Voice name too long (max 64 chars)")
+    return name
+
+
+def _ref_wav_path(name: str) -> Path:
+    return REF_VOICES_DIR / f"{name}.wav"
+
+
+def _ref_meta_path(name: str) -> Path:
+    return REF_VOICES_DIR / f"{name}.json"
+
+
+def _list_ref_voices() -> list[dict]:
+    """Return metadata for all registered reference voices (sorted by name)."""
+    out = []
+    for meta in sorted(REF_VOICES_DIR.glob("*.json")):
+        name = meta.stem
+        if not _ref_wav_path(name).exists():
+            continue
+        try:
+            m = json.loads(meta.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        out.append({
+            "id": name,
+            "name": name,
+            "language": "Thai (voice clone)",
+            "text": m.get("text", ""),
+            "source": m.get("source", ""),
+            "created": m.get("created", 0),
+            "duration": m.get("duration", 0),
+        })
+    return out
+
+
+def _get_ref_voice(name: str) -> Optional[tuple[str, str]]:
+    """Return (wav_path, ref_text) for a registered voice, or None."""
+    wav = _ref_wav_path(name)
+    meta = _ref_meta_path(name)
+    if not wav.exists() or not meta.exists():
+        return None
+    try:
+        text = json.loads(meta.read_text(encoding="utf-8")).get("text", "")
+    except Exception:
+        return None
+    return str(wav), text
+
+
+def _clone_voices() -> list[dict]:
+    """Voice entries appended to the /voices list for f5/jaitts engines."""
+    return [
+        {"id": v["id"], "name": f"Voice clone: {v['id']}", "language": "Thai (voice clone)"}
+        for v in _list_ref_voices()
+    ]
+
+
+def _resolve_ref_voice(engine: dict, request: "TTSRequest") -> tuple[str, str]:
+    """Resolve a reference voice for F5-family engines.
+
+    Priority:
+      1. request.ref (Option C) — a file in ./output or ./ref_voices
+      2. request.voice (Option A) — a registered reference voice
+      3. the engine's built-in default (auto-built MMS ref voice)
+    """
+    if request.ref:
+        if not request.ref_text or not request.ref_text.strip():
+            raise HTTPException(status_code=400, detail="ref_text is required when using ref")
+        name = request.ref
+        if "/" in name or "\\" in name or name.startswith("."):
+            raise HTTPException(status_code=400, detail="Invalid ref filename")
+        for base in (OUTPUT_DIR, REF_VOICES_DIR):
+            p = base / name
+            if p.exists() and p.is_file():
+                return str(p), request.ref_text.strip()
+        raise HTTPException(status_code=404, detail=f"ref file not found: {name}")
+    if request.voice and request.voice != "default":
+        found = _get_ref_voice(request.voice)
+        if found is None:
+            raise HTTPException(status_code=404, detail=f"Unknown voice: {request.voice}")
+        return found
+    return engine["ref"], engine["ref_text"]
+
 # Media types we recognise
 MEDIA_EXTENSIONS = {
     ".wav": "audio/wav",
@@ -420,6 +524,9 @@ class TTSRequest(BaseModel):
     voice: str = "af_heart"
     speed: float = 1.0
     engine: Literal["kokoro", "thai", "piper", "mms", "f5", "jaitts"] = "kokoro"
+    # Voice cloning (f5/jaitts engines): reference an existing media file directly
+    ref: Optional[str] = None
+    ref_text: Optional[str] = None
 
 
 # ── Web UI ──────────────────────────────────────────────────────────────
@@ -476,12 +583,100 @@ async def list_voices(engine: str = "kokoro"):
     if engine == "mms":
         return MMS_VOICES
     if engine == "f5":
-        return F5_VOICES
+        return F5_VOICES + _clone_voices()
     if engine == "jaitts":
-        return JAITTS_VOICES
+        return JAITTS_VOICES + _clone_voices()
     if engine == "piper":
         return PIPER_VOICES
     raise HTTPException(status_code=422, detail=f"Unknown engine: {engine}")
+
+
+# ── Voice cloning API ────────────────────────────────────────────────────
+
+
+@app.post("/api/ref-voices")
+async def add_ref_voice(
+    name: str = Form(""),
+    text: str = Form(""),
+    audio: UploadFile = File(...),
+):
+    """Register a reference voice for cloning (f5/jaitts engines).
+
+    Multipart form: name (slug), text (required transcript of the clip),
+    audio (any format pydub/ffmpeg can decode). Stored as 24 kHz mono WAV
+    with leading/trailing silence trimmed.
+    """
+    from pydub import AudioSegment
+
+    safe = _safe_ref_name(name)
+    transcript = text.strip()
+    if not transcript:
+        raise HTTPException(status_code=400, detail="ref_text (text) is required")
+    if len(transcript) > 1000:
+        raise HTTPException(status_code=400, detail="ref_text too long (max 1000 chars)")
+
+    data = await audio.read()
+    if len(data) > MAX_REF_AUDIO_MB * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"Audio too large (max {MAX_REF_AUDIO_MB} MB)")
+
+    try:
+        seg = AudioSegment.from_file(io.BytesIO(data))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not decode audio (unsupported format?)")
+    if len(seg) < 1000:
+        raise HTTPException(status_code=400, detail="Reference audio too short (< 1s)")
+    if len(seg) > 60_000:
+        raise HTTPException(status_code=400, detail="Reference audio too long (> 60s) — keep it 5–20s")
+
+    seg = seg.set_channels(1).set_frame_rate(24000)
+    try:
+        from flowtts.inference import remove_silence_edges
+        seg = remove_silence_edges(seg)
+    except Exception:
+        pass
+
+    REF_VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    seg.export(str(_ref_wav_path(safe)), format="wav")
+    meta = {
+        "text": transcript,
+        "source": audio.filename or "",
+        "created": time.time(),
+        "duration": round(len(seg) / 1000.0, 3),
+    }
+    _ref_meta_path(safe).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[server] Registered reference voice '{safe}' ({meta['duration']}s)")
+    return {"id": safe, **meta}
+
+
+@app.get("/api/ref-voices")
+async def list_ref_voices():
+    """List registered reference voices (voice clones)."""
+    return _list_ref_voices()
+
+
+@app.get("/api/ref-voices/{name}")
+async def get_ref_voice(name: str):
+    """Serve a registered reference voice's audio."""
+    safe = _safe_ref_name(name)
+    wav = _ref_wav_path(safe)
+    if not wav.exists():
+        raise HTTPException(status_code=404, detail="Voice not found")
+    return FileResponse(str(wav), media_type="audio/wav")
+
+
+@app.delete("/api/ref-voices/{name}")
+async def delete_ref_voice(name: str):
+    """Remove a registered reference voice."""
+    safe = _safe_ref_name(name)
+    removed = False
+    for p in (_ref_wav_path(safe), _ref_meta_path(safe)):
+        if p.exists():
+            p.unlink()
+            removed = True
+    if not removed:
+        raise HTTPException(status_code=404, detail="Voice not found")
+    print(f"[server] Removed reference voice '{safe}'")
+    return {"ok": True, "id": safe}
 
 
 def _generate_kokoro(pipe: KPipeline, request: TTSRequest) -> np.ndarray:
@@ -545,10 +740,11 @@ def _generate_mms(request: TTSRequest, out_path: Path) -> None:
 
 def _generate_f5(request: TTSRequest, out_path: Path) -> None:
     f5 = get_f5()
+    ref_voice, ref_text = _resolve_ref_voice(f5, request)
     f5["pipeline"](
         text=request.text,
-        ref_voice=f5["ref"],
-        ref_text=f5["ref_text"],
+        ref_voice=ref_voice,
+        ref_text=ref_text,
         output_file=str(out_path),
         speed=request.speed,
     )
@@ -558,10 +754,11 @@ def _generate_f5(request: TTSRequest, out_path: Path) -> None:
 
 def _generate_jaitts(request: TTSRequest, out_path: Path) -> None:
     j = get_jaitts()
+    ref_voice, ref_text = _resolve_ref_voice(j, request)
     j["pipeline"](
         text=request.text,
-        ref_voice=j["ref"],
-        ref_text=j["ref_text"],
+        ref_voice=ref_voice,
+        ref_text=ref_text,
         output_file=str(out_path),
         speed=request.speed,
     )
@@ -592,6 +789,8 @@ async def generate_speech(request: TTSRequest):
             _generate_jaitts(request, out_path)
         else:  # piper
             _generate_piper(request, out_path)
+    except HTTPException:
+        raise
     except Exception as e:
         if request.engine != "kokoro" or not _is_oom(e):
             raise HTTPException(status_code=500, detail=str(e))

@@ -149,6 +149,35 @@
       <li class="empty">No files yet. Generate something!</li>
     </ul>
   </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
+      <h2 style="font-size:1rem;font-weight:600;">🎙 Voice Cloning <span style="font-size:0.7rem;color:#94a3b8;font-weight:400;">(F5 / JaiTTS)</span></h2>
+      <button class="btn btn-sm btn-ghost" id="ref-refresh-btn">⟳ Refresh</button>
+    </div>
+    <div class="form-row" style="margin-top:0;">
+      <div>
+        <label for="ref-name">Voice name</label>
+        <input type="text" id="ref-name" placeholder="e.g. my-voice" style="width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:0.6rem;font-size:0.9rem;">
+      </div>
+      <div style="flex:2;">
+        <label for="ref-text">Transcript of the clip (required)</label>
+        <textarea id="ref-text" placeholder="Type exactly what the person says in the audio…" style="min-height:60px;"></textarea>
+      </div>
+    </div>
+    <div class="form-row">
+      <div style="flex:2;">
+        <label for="ref-file">Reference audio (5–20s, single speaker)</label>
+        <input type="file" id="ref-file" accept="audio/*,video/*,.wav,.mp3,.m4a,.ogg,.flac,.mp4,.webm,.mov,.mkv" style="width:100%;color:#94a3b8;font-size:0.85rem;">
+      </div>
+      <div style="flex:1;display:flex;align-items:flex-end;">
+        <button class="btn btn-primary" id="register-btn" style="width:100%;">＋ Register voice</button>
+      </div>
+    </div>
+    <ul class="file-list" id="ref-voice-list" style="margin-top:0.5rem;">
+      <li class="empty">No registered voices. Upload a clip to clone it.</li>
+    </ul>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -346,9 +375,88 @@ async function generate() {
   }
 }
 
+// ── voice cloning (reference voices) ────────────────────────────────────
+async function loadRefVoices() {
+  const list = document.getElementById('ref-voice-list');
+  try {
+    const res = await fetch('/api/ref-voices');
+    if (!res.ok) throw new Error('Failed to load');
+    const voices = await res.json();
+    if (voices.length === 0) {
+      list.innerHTML = '<li class="empty">No registered voices. Upload a clip to clone it.</li>';
+      return;
+    }
+    list.innerHTML = voices.map(v => `<li>
+      <div class="file-info">
+        <div class="name"><span class="badge badge-audio">🎙</span>${v.id}</div>
+        <div class="meta">${v.duration}s — ${fmtTime(v.created)}</div>
+      </div>
+      <div class="file-actions">
+        <button class="btn btn-sm btn-ghost" onclick="playRefVoice('${v.id}')" title="Play">▶</button>
+        <button class="btn btn-sm btn-ghost" onclick="deleteRefVoice('${v.id}')" title="Delete">🗑</button>
+      </div>
+    </li>`).join('');
+  } catch (e) {
+    list.innerHTML = '<li class="empty">Error loading voices.</li>';
+  }
+}
+
+function playRefVoice(name) {
+  showPlayer(`/api/ref-voices/${encodeURIComponent(name)}`, 'audio');
+}
+
+async function deleteRefVoice(name) {
+  if (!confirm(`Delete voice '${name}'?`)) return;
+  const res = await fetch(`/api/ref-voices/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (res.ok) {
+    toast('Voice deleted');
+    loadRefVoices();
+    loadVoices();
+  } else {
+    toast('Delete failed');
+  }
+}
+
+async function registerVoice() {
+  const name = document.getElementById('ref-name').value.trim();
+  const text = document.getElementById('ref-text').value.trim();
+  const fileInput = document.getElementById('ref-file');
+  const btn = document.getElementById('register-btn');
+  if (!name) { toast('Enter a voice name.'); return; }
+  if (!text) { toast('Enter the transcript of the clip.'); return; }
+  if (!fileInput.files.length) { toast('Choose a reference audio file.'); return; }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Uploading…';
+  try {
+    const fd = new FormData();
+    fd.append('name', name);
+    fd.append('text', text);
+    fd.append('audio', fileInput.files[0]);
+    const res = await fetch('/api/ref-voices', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || 'Upload failed');
+    }
+    toast('Voice registered!');
+    document.getElementById('ref-name').value = '';
+    document.getElementById('ref-text').value = '';
+    fileInput.value = '';
+    loadRefVoices();
+    loadVoices();
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '＋ Register voice';
+  }
+}
+
 // ── wire it up ──────────────────────────────────────────────────────────
 document.getElementById('generate-btn').addEventListener('click', generate);
 document.getElementById('refresh-btn').addEventListener('click', loadFileList);
+document.getElementById('register-btn').addEventListener('click', registerVoice);
+document.getElementById('ref-refresh-btn').addEventListener('click', loadRefVoices);
 
 // Allow Ctrl+Enter / Cmd+Enter to submit
 document.getElementById('text').addEventListener('keydown', (e) => {
@@ -358,6 +466,7 @@ document.getElementById('text').addEventListener('keydown', (e) => {
 // Initial load
 loadVoices();
 loadFileList();
+loadRefVoices();
 </script>
 </body>
 </html>

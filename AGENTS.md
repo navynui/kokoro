@@ -26,12 +26,14 @@ Browser ──GET /media/list──────────> FastAPI ──> JSO
 Browser ──GET /media/{file}────────> FastAPI ──> media file (correct MIME)
 Browser ──POST /v1/audio/speech────> FastAPI ──> engine ──> WAV response
              {"text","voice","speed","engine"}   │
-                                                 ├─ kokoro: KPipeline (GPU)
-                                                 ├─ thai:    PyThaiTTS/Vachana (CPU/ONNX)
-                                                 └─ piper:   PiperVoice (CPU/ONNX)
+             + optional {"ref","ref_text"}          ├─ kokoro: KPipeline (GPU)
+             (voice cloning, f5/jaitts)              ├─ thai:    PyThaiTTS/Vachana (CPU/ONNX)
+                                                    └─ piper:   PiperVoice (CPU/ONNX)
   MMS (`mms`): transformers VitsModel (facebook/mms-tts-tha), 16 kHz, GPU.
   F5 (`f5`): ThonburianTTS FlowTTSPipeline (F5-TTS Mega), 24 kHz, GPU; auto-builds a default ref voice via MMS on first use.
   JaiTTS (`jaitts`): JTS-AI JaiTTS-F5TTS checkpoint (same FlowTTSPipeline), 24 kHz, GPU; research prototype from the JaiTTS paper (better Thai CER than ThonburianTTS); shares the same ref-voice mechanism.
+  Voice clones: POST/GET/DELETE /api/ref-voices — register a ref clip + transcript; f5/jaitts then
+  condition on it instead of the default (zero-shot cloning, no fine-tuning).
                                               Downloads model
                                               on first use
 ```
@@ -64,13 +66,17 @@ Request:
   "voice": string      (default "af_heart")
   "speed": float       (default 1.0)
   "engine": string     (default "kokoro"; "kokoro" | "thai" | "piper" | "mms" | "f5" | "jaitts")
+  "ref": string        (optional, f5/jaitts only) filename in ./output or ./ref_voices to clone
+  "ref_text": string   (required when "ref" is set) exact transcript of the ref clip
 }
 
 Headers (response):
   X-Audio-Filename: <uuid>.wav
 
-Response: 200 audio/wav (binary) | 500 {"detail": "..."}
+Response: 200 audio/wav (binary) | 400/404/500 {"detail": "..."}
 ```
+
+- Voice cloning (f5/jaitts): `voice` may be a registered ref-voice name (see below); `ref` + `ref_text` clone from an arbitrary existing media file in `./output` or `./ref_voices`. Without either, the auto-built MMS default ref voice is used.
 
 - Kokoro: 24 kHz WAV, GPU with CPU fallback.
 - Thai (`thai`): 22.05 kHz WAV, voices `th_f_1|th_f_2|th_m_1|th_m_2`, models in `/app/voices` (mounted `./pythai_voices`).
@@ -81,6 +87,32 @@ Response: 200 audio/wav (binary) | 500 {"detail": "..."}
 ```
 GET /voices?engine=kokoro|thai|piper|mms|f5|jaitts
 Response: 200 [{"id", "name", "language"}, ...] | 422 unknown engine
+```
+
+For `f5`/`jaitts`, the list appends one entry per registered reference voice (`Voice clone: <name>`).
+
+### `POST /api/ref-voices`
+
+Register a reference voice for cloning. Multipart form fields: `name` (slug, <= 64 chars), `text` (exact transcript, required), `audio` (any format pydub/ffmpeg decodes; 1–60s; stored as trimmed 24 kHz mono WAV).
+
+```
+Response: 200 {"id", "text", "source", "created", "duration"} | 400/413
+```
+
+### `GET /api/ref-voices`
+
+```
+Response: 200 [{"id", "name", "language", "text", "source", "created", "duration"}, ...]
+```
+
+### `GET /api/ref-voices/{name}`
+
+Serves the registered clip as `audio/wav`.
+
+### `DELETE /api/ref-voices/{name}`
+
+```
+Response: 200 {"ok": true} | 404
 ```
 
 ### `GET /media/list`
@@ -191,6 +223,7 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - **Engines:** `engine` field on the API selects `kokoro` (GPU) / `thai` (PyThaiTTS VachanaTTS2, CPU/ONNX) / `piper` (Piper, CPU/ONNX) / `mms` (Meta MMS-TTS Thai, GPU, 16 kHz) / `f5` (ThonburianTTS F5-TTS Mega, GPU, 24 kHz) / `jaitts` (JTS-AI JaiTTS-F5TTS, GPU, 24 kHz; Thai voice-cloning research prototype with better Thai CER than `f5`). All are lazy-loaded singletons. Piper voices download on first use from `rhasspy/piper-voices` (URL derived from voice id: `{lang}/{lang}_{dialect}/{name}/{quality}/{voice_id}.onnx`); Thai voices from `VIZINTZOR/VachanaTTS` (written by `vachanatts` to `/app/voices`). Thai text is preprocessed (digits → Thai words, ๆ expansion) before synthesis.
 - **F5 specifics:** `./f5_models` holds the 1.35 GB `mega_f5_last.safetensors` + vocab + `ref_voice.wav`. The ref voice is synthesized once via MMS (`F5_REF_TEXT`) so the pipeline never triggers its whisper-based `transcribe()` (which would need a ~3 GB ASR model). F5 runs fp32 on the GTX 1060 (~1.6 GB VRAM, ~4 s/sentence cached). Requires `ffmpeg` (pydub).
 - **JaiTTS specifics:** `./jaitts_models` holds the 1.35 GB `model.pt` + vocab from `JTS-AI/JaiTTS-F5TTS` (Apache 2.0). Same `flowtts` pipeline as `f5`; vocab is byte-identical to F5's, so it reuses the same char set and the same MMS-built ref voice (`F5_REF_TEXT`). Uses `AudioConfig(cfg_strength=2.5)` per the JaiTTS quickstart. The XLM-R duration-predictor variant from the paper is not released — only the base F5 checkpoint. Warm synthesis ~2.3s on P100.
+- **Voice cloning (f5/jaitts):** zero-shot — the flowtts pipeline conditions on any (ref_wav, ref_text) pair. Registered voices live in `./ref_voices` (`{name}.wav` + `{name}.json`), volume-mounted and gitignored, and are NOT exposed via `/media/list`. Upload requires the exact transcript (phase 1; auto-transcribe with a local ASR is a possible phase 2 — the pipeline's built-in `transcribe()` would pull a ~3 GB whisper model). `ref`/`ref_text` on the TTS request clones from any existing file in `./output` or `./ref_voices`. Cloning quality depends on the clip: 5–20s, single speaker, clean audio, accurate transcript.
 - **GPU idle unload:** GPU models (Kokoro, MMS, F5, JaiTTS) are dropped from VRAM after `IDLE_UNLOAD_MINUTES` (default 10, set in docker-compose `environment`; `0` disables) with no API/web activity. A FastAPI middleware (`activity_middleware`) records activity + in-flight requests; a daemon thread polls every 30s and calls `_unload_gpu_models()` (drops singletons, `gc.collect()`, `torch.cuda.empty_cache()`). Re-init after unload is fast (weights on disk): F5 ~2s, MMS ~1s, Kokoro ~3s. CPU engines (Thai/Piper) stay loaded.
 - **Single worker:** Uvicorn runs without `--workers` to keep things simple.
 - **Host port 8001** is used because something else is on 8000.
