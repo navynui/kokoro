@@ -693,7 +693,16 @@ async def cleanup_media(days: float = 14.0):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    models_loaded = any(m is not None for m in (pipeline, _mms, _f5, _jaitts, _omnivoice))
+    return {"status": "ok", "models_loaded": models_loaded}
+
+
+@app.post("/api/unload")
+async def unload_models():
+    """Unload GPU models on demand from VRAM."""
+    _unload_gpu_models()
+    return {"status": "ok", "detail": "GPU models unloaded"}
+
 
 
 @app.get("/voices")
