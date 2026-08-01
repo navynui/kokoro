@@ -130,6 +130,13 @@
       </div>
     </div>
 
+    <div class="form-row" id="instruct-row" style="display:none;">
+      <div>
+        <label for="instruct">Voice style (OmniVoice instruct — optional, overrides Voice)</label>
+        <input type="text" id="instruct" placeholder="e.g. male, low pitch / female, elderly, whisper" style="width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:0.6rem;font-size:0.9rem;">
+      </div>
+    </div>
+
     <div class="generate-row">
       <button class="btn btn-primary" id="generate-btn">✨ Generate</button>
       <span id="status" style="font-size:0.85rem;color:#94a3b8;"></span>
@@ -216,7 +223,12 @@ async function loadVoices() {
   else voiceSelect.value = 'af_bella';
 }
 
-engineSelect.addEventListener('change', loadVoices);
+engineSelect.addEventListener('change', () => { loadVoices(); toggleInstruct(); });
+
+function toggleInstruct() {
+  document.getElementById('instruct-row').style.display =
+    engineSelect.value === 'omnivoice' ? 'flex' : 'none';
+}
 
 // ── speed slider ────────────────────────────────────────────────────────
 const speedInput = document.getElementById('speed');
@@ -343,6 +355,7 @@ async function generate() {
   const engine = document.getElementById('engine').value;
   const voice = document.getElementById('voice').value;
   const speed = parseFloat(document.getElementById('speed').value);
+  const instruct = document.getElementById('instruct').value.trim();
   const btn = document.getElementById('generate-btn');
   const status = document.getElementById('status');
 
@@ -354,7 +367,7 @@ async function generate() {
     const res = await fetch('/v1/audio/speech', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, voice, speed, engine }),
+      body: JSON.stringify({ text, voice, speed, engine, ...(instruct ? { instruct } : {}) }),
     });
 
     if (!res.ok) {
@@ -491,6 +504,7 @@ document.getElementById('text').addEventListener('keydown', (e) => {
 
 // Initial load
 loadVoices();
+toggleInstruct();
 loadFileList();
 loadRefVoices();
 </script>

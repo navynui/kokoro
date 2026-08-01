@@ -41,6 +41,7 @@ Generate speech from text.
 | `voice` | string | `"af_heart"` | Voice ID (see `/voices` per engine) |
 | `speed` | number | `1.0` | Speaking speed |
 | `engine` | string | `"kokoro"` | `kokoro` \| `thai` \| `piper` \| `mms` \| `f5` \| `jaitts` \| `omnivoice` |
+| `instruct` | string | — | (OmniVoice only) voice-design style, e.g. `"male, low pitch"`; overrides `voice`/`ref` |
 
 **Response:** WAV audio (`audio/wav`), 16-bit mono. Sample rate is engine-dependent (Kokoro 24 kHz, Thai/Piper 22.05 kHz).
 
@@ -136,6 +137,12 @@ curl -X POST "http://localhost:8001/v1/audio/speech" \
   -H "Content-Type: application/json" \
   -d '{"text": "สวัสดีครับ", "engine": "omnivoice", "voice": "default"}' \
   --output thai_omnivoice.wav
+
+# Thai — OmniVoice voice design (no ref audio needed)
+curl -X POST "http://localhost:8001/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "สวัสดีครับ", "engine": "omnivoice", "voice": "male-low"}' \
+  --output thai_omnivoice_male.wav
 
 # Thai — fast (Meta MMS)
 curl -X POST "http://localhost:8001/v1/audio/speech" \

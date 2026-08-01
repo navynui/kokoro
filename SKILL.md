@@ -161,7 +161,7 @@ JTS-AI JaiTTS-F5TTS checkpoint (Apache 2.0), same FlowTTSPipeline as `f5` with `
 
 ### Thai OmniVoice (engine `omnivoice`)
 
-Qwen3-0.6B MaskGIT diffusion fine-tuned for Thai (`hotdogs/omnivoice-thai`, Apache 2.0), 24 kHz, GPU. `default` uses the model's auto voice (no reference clip needed — unlike F5, no ref is required). Voice cloning reuses the same registered ref voices as `f5`/`jaitts` (transcripts always supplied, so no Whisper ASR download). The model also supports an `instruct` voice-design mode (e.g. `"male, low pitch"`) not yet exposed via the API.
+Qwen3-0.6B MaskGIT diffusion fine-tuned for Thai (`hotdogs/omnivoice-thai`, Apache 2.0), 24 kHz, GPU. `default` uses the model's auto voice (no reference clip needed — unlike F5, no ref is required). Voice cloning reuses the same registered ref voices as `f5`/`jaitts` (transcripts always supplied, so no Whisper ASR download). Voice design is exposed as curated presets (`/voices?engine=omnivoice`, e.g. `male-low`, `female-bright`, `whisper`) plus a free-form `instruct` request field — attributes: gender, age, pitch, whisper. No other Thai OmniVoice checkpoints exist on HF.
 
 ### Piper (engine `piper`)
 
@@ -206,6 +206,12 @@ curl -s -X POST "http://localhost:8001/v1/audio/speech" \
   -H "Content-Type: application/json" \
   -d '{"text": "สวัสดีครับ", "voice": "default", "engine": "omnivoice"}' \
   --output /tmp/thai_omnivoice.wav
+
+# Voice design — OmniVoice preset (no ref audio needed)
+curl -s -X POST "http://localhost:8001/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "สวัสดีครับ", "voice": "male-low", "engine": "omnivoice"}' \
+  --output /tmp/thai_omnivoice_male.wav
 ```
 
 ### 2. List all generated files

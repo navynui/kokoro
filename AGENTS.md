@@ -69,6 +69,7 @@ Request:
   "engine": string     (default "kokoro"; "kokoro" | "thai" | "piper" | "mms" | "f5" | "jaitts" | "omnivoice")
   "ref": string        (optional, f5/jaitts/omnivoice) filename in ./output or ./ref_voices to clone
   "ref_text": string   (required when "ref" is set) exact transcript of the ref clip
+  "instruct": string   (optional, omnivoice only) voice-design instruction, e.g. "male, low pitch"; overrides voice/ref
 }
 
 Headers (response):
@@ -78,6 +79,7 @@ Response: 200 audio/wav (binary) | 400/404/500 {"detail": "..."}
 ```
 
 - Voice cloning (f5/jaitts/omnivoice): `voice` may be a registered ref-voice name (see below); `ref` + `ref_text` clone from an arbitrary existing media file in `./output` or `./ref_voices`. F5/JaiTTS fall back to the auto-built MMS default ref voice; OmniVoice falls back to auto voice (no reference — the model picks a voice itself).
+- OmniVoice voice design: `voice` may also be a design preset id (listed in `/voices?engine=omnivoice`, e.g. `male-low`, `female-bright`, `whisper`) mapped to an `instruct` string; or pass `instruct` directly. Resolution: `instruct` → `ref` → design preset → registered ref voice → auto.
 
 - Kokoro: 24 kHz WAV, GPU with CPU fallback.
 - Thai (`thai`): 22.05 kHz WAV, voices `th_f_1|th_f_2|th_m_1|th_m_2`, models in `/app/voices` (mounted `./pythai_voices`).
@@ -91,7 +93,7 @@ GET /voices?engine=kokoro|thai|piper|mms|f5|jaitts|omnivoice
 Response: 200 [{"id", "name", "language"}, ...] | 422 unknown engine
 ```
 
-For `f5`/`jaitts`/`omnivoice`, the list appends one entry per registered reference voice (`Voice clone: <name>`).
+For `f5`/`jaitts`/`omnivoice`, the list appends one entry per registered reference voice (`Voice clone: <name>`); `omnivoice` also appends curated voice-design presets (`Design: …`).
 
 ### `POST /api/ref-voices`
 
@@ -235,7 +237,7 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - **F5 specifics:** `./f5_models` holds the 1.35 GB `mega_f5_last.safetensors` + vocab + `ref_voice.wav`. The ref voice is synthesized once via MMS (`F5_REF_TEXT`) so the pipeline never triggers its whisper-based `transcribe()` (which would need a ~3 GB ASR model). F5 runs fp32 on the GTX 1060 (~1.6 GB VRAM, ~4 s/sentence cached). Requires `ffmpeg` (pydub).
 - **JaiTTS specifics:** `./jaitts_models` holds the 1.35 GB `model.pt` + vocab from `JTS-AI/JaiTTS-F5TTS` (Apache 2.0). Same `flowtts` pipeline as `f5`; vocab is byte-identical to F5's, so it reuses the same char set and the same MMS-built ref voice (`F5_REF_TEXT`). Uses `AudioConfig(cfg_strength=2.5)` per the JaiTTS quickstart. The XLM-R duration-predictor variant from the paper is not released — only the base F5 checkpoint. Warm synthesis ~2.3s on P100.
 - **Voice cloning (f5/jaitts):** zero-shot — the flowtts pipeline conditions on any (ref_wav, ref_text) pair. Registered voices live in `./ref_voices` (`{name}.wav` + `{name}.json`), volume-mounted and gitignored, and are NOT exposed via `/media/list`. Upload requires the exact transcript (phase 1; auto-transcribe with a local ASR is a possible phase 2 — the pipeline's built-in `transcribe()` would pull a ~3 GB whisper model). `ref`/`ref_text` on the TTS request clones from any existing file in `./output` or `./ref_voices`. Cloning quality depends on the clip: 5–20s, single speaker, clean audio, accurate transcript.
-- **OmniVoice specifics:** `./omnivoice_models/omnivoice-thai` holds the 2.45 GB fp32 `model.safetensors` (Qwen3-0.6B) + tokenizer files; the higgs audio tokenizer (0.8 GB) downloads into the HF cache. Loaded fp16 on GPU (~1.2 GB VRAM) via `_pick_device()`. `load_asr=False` because ref voices always carry transcripts — avoids a ~3 GB Whisper download. `generate(..., language="Thai", speed=request.speed/pace)`; no duration-scale patch needed (MaskGIT duration estimator, unlike flowtts). `instruct` voice-design mode is supported by the model but not yet exposed via the API.
+- **OmniVoice specifics:** `./omnivoice_models/omnivoice-thai` holds the 2.45 GB fp32 `model.safetensors` (Qwen3-0.6B) + tokenizer files; the higgs audio tokenizer (0.8 GB) downloads into the HF cache. Loaded fp16 on GPU (~1.2 GB VRAM) via `_pick_device()`. `load_asr=False` because ref voices always carry transcripts — avoids a ~3 GB Whisper download. `generate(..., language="Thai", speed=request.speed/pace)`; no duration-scale patch needed (MaskGIT duration estimator, unlike flowtts). Voice-design via `instruct` is exposed as curated presets (`/voices?engine=omnivoice`, `Design: …`) plus a free-form `instruct` request field.
 - **GPU idle unload:** GPU models (Kokoro, MMS, F5, JaiTTS, OmniVoice) are dropped from VRAM after `IDLE_UNLOAD_MINUTES` (default 10, set in docker-compose `environment`; `0` disables) with no API/web activity. A FastAPI middleware (`activity_middleware`) records activity + in-flight requests; a daemon thread polls every 30s and calls `_unload_gpu_models()` (drops singletons, `gc.collect()`, `torch.cuda.empty_cache()`). Re-init after unload is fast (weights on disk): F5 ~2s, MMS ~1s, Kokoro ~3s, OmniVoice ~2–4s (2.45 GB from disk). CPU engines (Thai/Piper) stay loaded.
 - **Thai duration scale (Dockerfile patch):** the flowtts UTF-8 byte-ratio duration formula underestimates for Thai, producing rushed speech at `speed=1.0` (JaiTTS paper calls this out). The Dockerfile patches the installed `flowtts/infer/utils_infer.py` to multiply the predicted duration by `F5_DURATION_SCALE` (env, default `1.8`, set in docker-compose). Also patches `flowtts/inference.py` to use unique per-request temp ref filenames (was fixed `temp_short_ref.wav`/`ref_converted.wav`). F5-family pipelines (f5, jaitts, and all clones) now sound natural at `speed=1.0`; the old workaround of `speed=0.5` is no longer needed.
 - **Voice clone tuning:** each registered voice has a `pace` (default 1.0) applied as `speed / pace` server-side — raise it if a clone sounds rushed, lower it if too slow. Adjustable after registration via `PATCH /api/ref-voices/{name}` or the ✎ button in the web UI. F5-family `ModelConfig` uses a fixed `seed=0` so cloned-voice outputs are reproducible (the default `-1` randomized sampling every call, which made clone fidelity vary run-to-run).
@@ -252,6 +254,6 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - [ ] Expose available voices via a `GET /voices` endpoint
 - [ ] Add streaming (chunked transfer) for long-form TTS
 - [x] Add a simple web UI (Gradio or custom HTML)
-- [ ] Expose OmniVoice `instruct` voice-design mode (e.g. `"male, low pitch"`) via an optional `instruct` field on `POST /v1/audio/speech` (model already supports it; only the API/UI plumbing is missing)
+- [x] Expose OmniVoice `instruct` voice-design mode — curated presets in `/voices?engine=omnivoice` (`Design: …`) + optional `instruct` request field + UI input (shown for the omnivoice engine)
 - [ ] Pre-download OmniVoice model files in the Dockerfile so the first request doesn't wait on 2.45 GB
 - [ ] Add OmniVoice mid-generation CUDA OOM retry-on-CPU (currently only Kokoro has it)

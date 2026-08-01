@@ -200,6 +200,31 @@ OMNIVOICE_VOICES = [
     {"id": "default", "name": "Auto voice (model picks; cloning via registered ref voices)", "language": "Thai"},
 ]
 
+# Voice-design presets for OmniVoice — curated `instruct` strings, no ref audio
+# needed. Attributes are combinable: gender | age | pitch | whisper (one per
+# category). Resolution priority in _generate_omnivoice: request.instruct →
+# request.ref → design preset (voice=) → registered ref voice → auto.
+OMNIVOICE_DESIGN_VOICES = [
+    {"id": "male-low", "name": "Male — low pitch", "instruct": "male, low pitch"},
+    {"id": "male-deep", "name": "Male — very low pitch", "instruct": "male, very low pitch"},
+    {"id": "male-mature", "name": "Male — middle-aged", "instruct": "male, middle-aged"},
+    {"id": "male-elderly", "name": "Male — elderly", "instruct": "male, elderly"},
+    {"id": "female-bright", "name": "Female — high pitch", "instruct": "female, high pitch"},
+    {"id": "female-soft", "name": "Female — moderate pitch", "instruct": "female, moderate pitch"},
+    {"id": "female-young", "name": "Female — young adult", "instruct": "female, young adult"},
+    {"id": "child-bright", "name": "Child — high pitch", "instruct": "child, high pitch"},
+    {"id": "whisper", "name": "Whisper", "instruct": "whisper"},
+]
+OMNIVOICE_DESIGN_INSTRUCT = {v["id"]: v["instruct"] for v in OMNIVOICE_DESIGN_VOICES}
+
+
+def _design_voices() -> list[dict]:
+    """Voice entries appended to the /voices list for the omnivoice engine."""
+    return [
+        {"id": v["id"], "name": f"Design: {v['name']}", "language": "Thai (voice design)"}
+        for v in OMNIVOICE_DESIGN_VOICES
+    ]
+
 PIPER_VOICES = [
     {"id": "en_US-lessac-medium", "name": "Lessac", "language": "English (US)"},
     {"id": "en_GB-alan-medium", "name": "Alan", "language": "English (UK)"},
@@ -596,6 +621,8 @@ class TTSRequest(BaseModel):
     # Voice cloning (f5/jaitts engines): reference an existing media file directly
     ref: Optional[str] = None
     ref_text: Optional[str] = None
+    # OmniVoice voice-design instruction (e.g. "male, low pitch"); overrides voice/ref
+    instruct: Optional[str] = None
 
 
 # ── Web UI ──────────────────────────────────────────────────────────────
@@ -656,7 +683,7 @@ async def list_voices(engine: str = "kokoro"):
     if engine == "jaitts":
         return JAITTS_VOICES + _clone_voices()
     if engine == "omnivoice":
-        return OMNIVOICE_VOICES + _clone_voices()
+        return OMNIVOICE_VOICES + _design_voices() + _clone_voices()
     if engine == "piper":
         return PIPER_VOICES
     raise HTTPException(status_code=422, detail=f"Unknown engine: {engine}")
@@ -884,17 +911,26 @@ def _generate_jaitts(request: TTSRequest, out_path: Path) -> None:
 
 def _generate_omnivoice(request: TTSRequest, out_path: Path) -> None:
     om = get_omnivoice()
-    # Same ref resolution as F5/JaiTTS: request.ref file → registered voice →
-    # auto mode (no reference; the model picks a voice itself).
-    ref_audio, ref_text, pace = _resolve_ref_voice(om, request)
-    kwargs = {
-        "text": request.text,
-        "language": "Thai",
-        "speed": request.speed / pace,
-    }
-    if ref_audio:
+    kwargs = {"text": request.text, "language": "Thai", "speed": request.speed}
+    if request.instruct:
+        # Explicit voice-design instruction (power users) — overrides everything
+        kwargs["instruct"] = request.instruct
+    elif request.ref:
+        # Clone from an arbitrary file in ./output or ./ref_voices
+        ref_audio, ref_text, pace = _resolve_ref_voice(om, request)
+        kwargs["speed"] = request.speed / pace
         kwargs["ref_audio"] = ref_audio
         kwargs["ref_text"] = ref_text
+    elif request.voice in OMNIVOICE_DESIGN_INSTRUCT:
+        # Curated voice-design preset (no ref audio needed)
+        kwargs["instruct"] = OMNIVOICE_DESIGN_INSTRUCT[request.voice]
+    else:
+        # Registered ref voice → auto voice (the model picks)
+        ref_audio, ref_text, pace = _resolve_ref_voice(om, request)
+        kwargs["speed"] = request.speed / pace
+        if ref_audio:
+            kwargs["ref_audio"] = ref_audio
+            kwargs["ref_text"] = ref_text
     audios = om["model"].generate(**kwargs)
     if not audios or len(audios[0]) == 0:
         raise HTTPException(status_code=500, detail="OmniVoice produced no audio")
