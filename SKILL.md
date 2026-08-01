@@ -161,7 +161,7 @@ JTS-AI JaiTTS-F5TTS checkpoint (Apache 2.0), same FlowTTSPipeline as `f5` with `
 
 ### Thai OmniVoice (engine `omnivoice`)
 
-Qwen3-0.6B MaskGIT diffusion fine-tuned for Thai (`hotdogs/omnivoice-thai`, Apache 2.0), 24 kHz, GPU. `default` uses the model's auto voice (no reference clip needed — unlike F5, no ref is required). Voice cloning reuses the same registered ref voices as `f5`/`jaitts` (transcripts always supplied, so no Whisper ASR download). Voice design is exposed as curated presets (`/voices?engine=omnivoice`, e.g. `male-low`, `female-bright`, `whisper`) plus a free-form `instruct` request field — attributes: gender, age, pitch, whisper. No other Thai OmniVoice checkpoints exist on HF.
+Qwen3-0.6B MaskGIT diffusion fine-tuned for Thai (`hotdogs/omnivoice-thai`, Apache 2.0), 24 kHz, GPU. `default` uses the model's auto voice (no reference clip needed — unlike F5, no ref is required). Voice cloning reuses the same registered ref voices as `f5`/`jaitts` (transcripts always supplied, so no Whisper ASR download). Voice design is exposed as curated presets (`/voices?engine=omnivoice`, e.g. `male-low`, `female-bright`, `whisper`) plus a free-form `instruct` request field — attributes: gender, age, pitch, whisper. Thai numerals are auto-preprocessed (digits → Thai words, `%` → เปอร์เซ็นต์) before synthesis. No other Thai OmniVoice checkpoints exist on HF.
 
 ### Piper (engine `piper`)
 

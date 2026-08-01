@@ -909,9 +909,29 @@ def _generate_jaitts(request: TTSRequest, out_path: Path) -> None:
         raise HTTPException(status_code=500, detail="JaiTTS produced no audio")
 
 
+def _preprocess_omnivoice_text(text: str) -> str:
+    """Normalize Thai numerals/percent for OmniVoice synthesis.
+
+    OmniVoice's EN/ZH-heavy base misreads raw digits and '%' inside Thai
+    text (e.g. reads "2026" in Chinese). Reuse PyThaiTTS's Thai preprocessor
+    (digits → Thai words, ๆ expansion) plus percent and comma handling:
+    "100%" → "หนึ่งร้อยเปอร์เซ็นต์", "1,250.5" → "หนึ่งพันสองร้อยห้าสิบจุดห้า".
+    """
+    from pythaitts import num_to_thai, preprocess_text
+    # Percent first: "100%" → "หนึ่งร้อยเปอร์เซ็นต์"
+    text = re.sub(
+        r"(\d[\d,]*(?:\.\d+)?)\s*%",
+        lambda m: num_to_thai(m.group(1).replace(",", "")) + "เปอร์เซ็นต์",
+        text,
+    )
+    # Strip thousands separators so preprocess_text doesn't split on commas
+    text = re.sub(r"(?<=\d),(?=\d)", "", text)
+    return preprocess_text(text)
+
+
 def _generate_omnivoice(request: TTSRequest, out_path: Path) -> None:
     om = get_omnivoice()
-    kwargs = {"text": request.text, "language": "Thai", "speed": request.speed}
+    kwargs = {"text": _preprocess_omnivoice_text(request.text), "language": "Thai", "speed": request.speed}
     if request.instruct:
         # Explicit voice-design instruction (power users) — overrides everything
         kwargs["instruct"] = request.instruct
