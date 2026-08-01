@@ -155,6 +155,22 @@ Backward-compatible — same format, `.wav` only.
 
 Serves any recognised media file with correct MIME type. Rejects path traversal.
 
+### `DELETE /media/{filename}`
+
+Deletes a single media file from `./output` (used by the 🗑 button in the web UI).
+
+```
+Response: 200 {"ok": true, "filename": "..."} | 400/404
+```
+
+### `POST /media/cleanup`
+
+Deletes all `.wav` files older than `days` (default 14) from `./output` (used by the 🧹 Cleanup button in the web UI).
+
+```
+Response: 200 {"ok": true, "removed": ["..."], "count": N}
+```
+
 ### `GET /`
 
 Serves the web UI (`static/index.html`). The UI renders audio files with `<audio>` and video files with `<video>`.

@@ -185,7 +185,10 @@
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
       <h2 style="font-size:1rem;font-weight:600;">Media Files</h2>
-      <button class="btn btn-sm btn-ghost" id="refresh-btn">⟳ Refresh</button>
+      <div style="display:flex;gap:0.35rem;">
+        <button class="btn btn-sm btn-ghost" id="cleanup-btn" title="Delete all .wav files older than 2 weeks">🧹 Cleanup</button>
+        <button class="btn btn-sm btn-ghost" id="refresh-btn">⟳ Refresh</button>
+      </div>
     </div>
     <ul class="file-list" id="file-list">
       <li class="empty">No files yet. Generate something!</li>
@@ -312,6 +315,7 @@ async function loadFileList() {
           <button class="btn btn-sm btn-ghost" onclick="downloadFile('${f.filename}')" title="Download">⬇</button>
           <button class="btn btn-sm btn-ghost" onclick="copyLink('${url}')" title="Copy link">🔗</button>
           <button class="btn btn-sm btn-ghost" onclick="shareFile('${url}','${f.filename}')" title="Share">📤</button>
+          <button class="btn btn-sm btn-ghost" onclick="deleteFile('${f.filename}')" title="Delete">🗑</button>
         </div>
       </li>`;
     }).join('');
@@ -344,6 +348,35 @@ function shareFile(url, name) {
     navigator.share({ title: name, url }).catch(() => {});
   } else {
     copyLink(url);
+  }
+}
+
+// ── delete / cleanup ────────────────────────────────────────────────────
+async function deleteFile(filename) {
+  if (!confirm(`Delete '${filename}'?`)) return;
+  try {
+    const res = await fetch(`/media/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || 'Delete failed');
+    }
+    toast('🗑 File deleted');
+    loadFileList();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function cleanupOldFiles() {
+  if (!confirm('Delete all .wav files older than 2 weeks?')) return;
+  try {
+    const res = await fetch('/media/cleanup', { method: 'POST' });
+    if (!res.ok) throw new Error('Cleanup failed');
+    const data = await res.json();
+    toast(data.count > 0 ? `🧹 Deleted ${data.count} old file(s)` : 'No old .wav files to clean');
+    loadFileList();
+  } catch (e) {
+    toast(e.message);
   }
 }
 
@@ -494,6 +527,7 @@ async function registerVoice() {
 // ── wire it up ──────────────────────────────────────────────────────────
 document.getElementById('generate-btn').addEventListener('click', generate);
 document.getElementById('refresh-btn').addEventListener('click', loadFileList);
+document.getElementById('cleanup-btn').addEventListener('click', cleanupOldFiles);
 document.getElementById('register-btn').addEventListener('click', registerVoice);
 document.getElementById('ref-refresh-btn').addEventListener('click', loadRefVoices);
 

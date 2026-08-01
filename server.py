@@ -661,6 +661,32 @@ async def get_file(filename: str):
     return FileResponse(str(filepath), media_type=mime)
 
 
+@app.delete("/media/{filename}")
+async def delete_media(filename: str):
+    """Delete a single media file from the output directory."""
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    filepath = OUTPUT_DIR / filename
+    if not filepath.exists() or not filepath.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    filepath.unlink()
+    print(f"[server] Deleted media file {filename}")
+    return {"ok": True, "filename": filename}
+
+
+@app.post("/media/cleanup")
+async def cleanup_media(days: float = 14.0):
+    """Delete .wav files older than `days` days from the output directory."""
+    cutoff = time.time() - days * 86400
+    removed = []
+    for f in OUTPUT_DIR.iterdir():
+        if f.suffix.lower() == ".wav" and f.is_file() and f.stat().st_mtime < cutoff:
+            removed.append(f.name)
+            f.unlink()
+    print(f"[server] Cleanup: removed {len(removed)} wav file(s) older than {days} days")
+    return {"ok": True, "removed": removed, "count": len(removed)}
+
+
 # ── TTS API ─────────────────────────────────────────────────────────────
 
 
