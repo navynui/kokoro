@@ -2,9 +2,10 @@
 output/
 *.wav
 
-# Downloaded model voices (Piper ONNX, Thai Vachana)
+# Downloaded model voices (Piper ONNX, Thai Vachana, F5/JaiTTS/OmniVoice)
 piper_models/
 pythai_voices/
 f5_models/
 jaitts_models/
+omnivoice_models/
 ref_voices/

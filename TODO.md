@@ -10,3 +10,9 @@
 
 - Phase 1: MMS (verified live: 0.33s synth, no new deps)
 - Phase 2: Thonburian (heavy: 1.35GB model, ffmpeg, f5-tts/vocos/librosa deps)
+
+## OmniVoice Thai engine (omnivoice)
+
+- [x] **Phase 1: Research** — verified `omnivoice` pip package (v0.2.1), model card, `transformers>=5.3.0` requirement, per-file download to avoid 4.9GB optimizer.bin
+- [x] **Phase 2: Implement** — `omnivoice` engine in server.py (lazy singleton, cloning via ref voices, auto voice default), Dockerfile dep, compose volume, UI option, docs
+- [ ] **Phase 3: Build & test** — rebuild container, test omnivoice + full regression; key check: kokoro still works with transformers 5.x

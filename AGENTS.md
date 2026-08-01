@@ -5,15 +5,15 @@
 - **Name:** Kokoro TTS Server
 - **Path:** `~/dev/kokoro/`
 - **Purpose:** Lightweight local TTS server via Docker, exposing a FastAPI REST endpoint backed by Kokoro-82M.
-- **Stack:** Python 3.11, FastAPI, Uvicorn, Kokoro-82M (GPU) + Thai Vachana/MMS/Thonburian-F5/JaiTTS-F5 (see Engines) + Piper (CPU), Docker Compose.
-- **GPU:** Both host GPUs are exposed to the container — Tesla P100 (cuda:0, preferred, fastest) and GTX 1060 (cuda:1). Device selection prefers P100 → 1060 → CPU (`_pick_device()` in server.py). Torch is pinned to `2.7.1+cu126` because newer builds dropped Pascal (sm_60/61) kernels. Automatic CPU fallback when VRAM is insufficient (see Constraints & Notes). Kokoro, MMS, and F5 use the GPU; Thai Vachana and Piper run on CPU (ONNX).
+- **Stack:** Python 3.11, FastAPI, Uvicorn, Kokoro-82M (GPU) + Thai Vachana/MMS/Thonburian-F5/JaiTTS-F5/OmniVoice (see Engines) + Piper (CPU), Docker Compose.
+- **GPU:** Both host GPUs are exposed to the container — Tesla P100 (cuda:0, preferred, fastest) and GTX 1060 (cuda:1). Device selection prefers P100 → 1060 → CPU (`_pick_device()` in server.py). Torch is pinned to `2.7.1+cu126` because newer builds dropped Pascal (sm_60/61) kernels. Automatic CPU fallback when VRAM is insufficient (see Constraints & Notes). Kokoro, MMS, F5, JaiTTS, and OmniVoice use the GPU; Thai Vachana and Piper run on CPU (ONNX).
 
 ## Key Files
 
 | File | Role |
 |---|---|
-| `docker-compose.yml` | Single service `tts`, maps host `8001` → container `8000`. Mounts `~/.cache/huggingface` (model cache), `./output` (audio files), `./piper_models`, `./pythai_voices` (voice models). |
-| `Dockerfile` | `python:3.11-slim` base. Pins `torch==2.7.1+cu126` (Pascal-compatible, from the PyTorch cu126 index) before installing `kokoro>=0.9.2`, `piper-tts>=1.6.0`, `pythaitts>=0.4.2`, `fastapi>=0.115.0`, `uvicorn[standard]>=0.34.0`, `soundfile`, `numpy`. |
+| `docker-compose.yml` | Single service `tts`, maps host `8001` → container `8000`. Mounts `~/.cache/huggingface` (model cache), `./output` (audio files), `./piper_models`, `./pythai_voices`, `./f5_models`, `./jaitts_models`, `./omnivoice_models`, `./ref_voices` (voice models). |
+| `Dockerfile` | `python:3.11-slim` base. Pins `torch==2.7.1+cu126` (Pascal-compatible, from the PyTorch cu126 index) before installing `kokoro>=0.9.2`, `piper-tts>=1.6.0`, `pythaitts>=0.4.2`, `omnivoice>=0.2.1`, `fastapi>=0.115.0`, `uvicorn[standard]>=0.34.0`, `soundfile`, `numpy`. |
 | `server.py` | FastAPI app. Serves web UI, audio file listing, and TTS endpoint. Lazy-init `KPipeline`. |
 | `static/index.html` | Single-page web UI with TTS form, inline player, file browser with play/download/share. Mobile-responsive. |
 | `.gitignore` | Ignores `output/` and `*.wav` |
@@ -27,12 +27,13 @@ Browser ──GET /media/{file}────────> FastAPI ──> media f
 Browser ──POST /v1/audio/speech────> FastAPI ──> engine ──> WAV response
              {"text","voice","speed","engine"}   │
              + optional {"ref","ref_text"}          ├─ kokoro: KPipeline (GPU)
-             (voice cloning, f5/jaitts)              ├─ thai:    PyThaiTTS/Vachana (CPU/ONNX)
+             (voice cloning, f5/jaitts/omnivoice)     ├─ thai:    PyThaiTTS/Vachana (CPU/ONNX)
                                                     └─ piper:   PiperVoice (CPU/ONNX)
   MMS (`mms`): transformers VitsModel (facebook/mms-tts-tha), 16 kHz, GPU.
   F5 (`f5`): ThonburianTTS FlowTTSPipeline (F5-TTS Mega), 24 kHz, GPU; auto-builds a default ref voice via MMS on first use.
   JaiTTS (`jaitts`): JTS-AI JaiTTS-F5TTS checkpoint (same FlowTTSPipeline), 24 kHz, GPU; research prototype from the JaiTTS paper (better Thai CER than ThonburianTTS); shares the same ref-voice mechanism.
-  Voice clones: POST/GET/DELETE /api/ref-voices — register a ref clip + transcript; f5/jaitts then
+  OmniVoice (`omnivoice`): hotdogs/omnivoice-thai (Qwen3-0.6B MaskGIT diffusion), 24 kHz, GPU; zero-shot cloning via ref_audio+ref_text, plus an `instruct` voice-design mode and auto voice.
+  Voice clones: POST/GET/DELETE /api/ref-voices — register a ref clip + transcript; f5/jaitts/omnivoice then
   condition on it instead of the default (zero-shot cloning, no fine-tuning).
                                               Downloads model
                                               on first use
@@ -65,8 +66,8 @@ Request:
   "text": string       (required)
   "voice": string      (default "af_heart")
   "speed": float       (default 1.0)
-  "engine": string     (default "kokoro"; "kokoro" | "thai" | "piper" | "mms" | "f5" | "jaitts")
-  "ref": string        (optional, f5/jaitts only) filename in ./output or ./ref_voices to clone
+  "engine": string     (default "kokoro"; "kokoro" | "thai" | "piper" | "mms" | "f5" | "jaitts" | "omnivoice")
+  "ref": string        (optional, f5/jaitts/omnivoice) filename in ./output or ./ref_voices to clone
   "ref_text": string   (required when "ref" is set) exact transcript of the ref clip
 }
 
@@ -76,20 +77,21 @@ Headers (response):
 Response: 200 audio/wav (binary) | 400/404/500 {"detail": "..."}
 ```
 
-- Voice cloning (f5/jaitts): `voice` may be a registered ref-voice name (see below); `ref` + `ref_text` clone from an arbitrary existing media file in `./output` or `./ref_voices`. Without either, the auto-built MMS default ref voice is used.
+- Voice cloning (f5/jaitts/omnivoice): `voice` may be a registered ref-voice name (see below); `ref` + `ref_text` clone from an arbitrary existing media file in `./output` or `./ref_voices`. F5/JaiTTS fall back to the auto-built MMS default ref voice; OmniVoice falls back to auto voice (no reference — the model picks a voice itself).
 
 - Kokoro: 24 kHz WAV, GPU with CPU fallback.
 - Thai (`thai`): 22.05 kHz WAV, voices `th_f_1|th_f_2|th_m_1|th_m_2`, models in `/app/voices` (mounted `./pythai_voices`).
 - Piper (`piper`): 22.05 kHz WAV, curated voices (e.g. `en_US-lessac-medium`), models in `/app/piper_models` (mounted `./piper_models`).
+- OmniVoice (`omnivoice`): 24 kHz WAV, GPU. Model + higgs audio tokenizer downloaded on first use into `/app/omnivoice_models` (mounted `./omnivoice_models`) — only the files needed for inference (the repo also ships a 4.9 GB optimizer.bin that a plain snapshot_download would pull; `_download_hf_file` fetches just `config.json`, `model.safetensors`, `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`).
 
 ### `GET /voices`
 
 ```
-GET /voices?engine=kokoro|thai|piper|mms|f5|jaitts
+GET /voices?engine=kokoro|thai|piper|mms|f5|jaitts|omnivoice
 Response: 200 [{"id", "name", "language"}, ...] | 422 unknown engine
 ```
 
-For `f5`/`jaitts`, the list appends one entry per registered reference voice (`Voice clone: <name>`).
+For `f5`/`jaitts`/`omnivoice`, the list appends one entry per registered reference voice (`Voice clone: <name>`).
 
 ### `POST /api/ref-voices`
 
@@ -164,12 +166,13 @@ uvicorn[standard] >= 0.34.0
 kokoro >= 0.9.2
 piper-tts >= 1.6.0     # pulls onnxruntime (CPU)
 pythaitts >= 0.4.2     # pulls onnxruntime, vachanatts, pythainlp, ssg
+omnivoice >= 0.2.1     # pulls transformers>=5.3.0, gradio, webdataset, accelerate, librosa; HiggsAudioV2TokenizerModel is transformers-5.x-native
 thonburian-tts (git)   # pulls f5-tts, vocos, librosa, torchaudio/torchvision; cloned+pinned in Dockerfile (repo lacks __init__.py)
 soundfile >= 0.13.0
 numpy >= 1.26.0
 ```
 
-Kokoro pulls in transformers, spaCy (en_core_web_sm), and misaki. Torch bundles its own CUDA 12.6 runtime, so no additional system deps are needed — but the host must have the NVIDIA driver + container toolkit installed.
+Kokoro pulls in transformers, spaCy (en_core_web_sm), and misaki. OmniVoice requires `transformers>=5.3.0` (kokoro pins no transformers version — regression-test kokoro after any transformers upgrade). Torch bundles its own CUDA 12.6 runtime, so no additional system deps are needed — but the host must have the NVIDIA driver + container toolkit installed.
 
 ## Common Tasks
 
@@ -228,11 +231,12 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - **No auth:** Server has no authentication. Use a reverse proxy (nginx/Caddy) if exposing outside localhost or the internet.
 - **GPU wired:** The container exposes both host GPUs via `deploy.resources.reservations.devices` — Tesla P100 (`GPU-37d0153e-32ad-2825-9300-de8903297fd1`, cuda:0) and GTX 1060 (`GPU-ebd852dc-b885-2874-feb2-1b37c939588b`, cuda:1). `_pick_device()` prefers the P100 (fastest) by name, then the 1060, then CPU, skipping devices with < `MIN_FREE_VRAM` free. Torch is pinned to `2.7.1+cu126` — newer PyPI torch builds (cu13x) dropped sm_60/61 kernels. F5 cached synthesis: ~2.2s on P100 (vs ~4.4s on 1060).
 - **CPU fallback (automatic):** `server.py` guards against missing/low VRAM in three ways — (1) `_pick_device()` checks `torch.cuda.mem_get_info()` and uses CPU if free VRAM < `MIN_FREE_VRAM` (1.5 GiB); (2) `_build_pipeline()` retries on CPU if CUDA init raises; (3) `_generate_kokoro()` catches mid-generation CUDA OOM, rebuilds the pipeline on CPU, and retries the request once (subsequent requests stay on CPU to avoid thrashing). Applies to the Kokoro engine only.
-- **Engines:** `engine` field on the API selects `kokoro` (GPU) / `thai` (PyThaiTTS VachanaTTS2, CPU/ONNX) / `piper` (Piper, CPU/ONNX) / `mms` (Meta MMS-TTS Thai, GPU, 16 kHz) / `f5` (ThonburianTTS F5-TTS Mega, GPU, 24 kHz) / `jaitts` (JTS-AI JaiTTS-F5TTS, GPU, 24 kHz; Thai voice-cloning research prototype with better Thai CER than `f5`). All are lazy-loaded singletons. Piper voices download on first use from `rhasspy/piper-voices` (URL derived from voice id: `{lang}/{lang}_{dialect}/{name}/{quality}/{voice_id}.onnx`); Thai voices from `VIZINTZOR/VachanaTTS` (written by `vachanatts` to `/app/voices`). Thai text is preprocessed (digits → Thai words, ๆ expansion) before synthesis.
+- **Engines:** `engine` field on the API selects `kokoro` (GPU) / `thai` (PyThaiTTS VachanaTTS2, CPU/ONNX) / `piper` (Piper, CPU/ONNX) / `mms` (Meta MMS-TTS Thai, GPU, 16 kHz) / `f5` (ThonburianTTS F5-TTS Mega, GPU, 24 kHz) / `jaitts` (JTS-AI JaiTTS-F5TTS, GPU, 24 kHz; Thai voice-cloning research prototype with better Thai CER than `f5`) / `omnivoice` (hotdogs/omnivoice-thai, Qwen3-0.6B MaskGIT diffusion, GPU, 24 kHz; zero-shot cloning + `instruct` voice design + auto voice). All are lazy-loaded singletons. Piper voices download on first use from `rhasspy/piper-voices` (URL derived from voice id: `{lang}/{lang}_{dialect}/{name}/{quality}/{voice_id}.onnx`); Thai voices from `VIZINTZOR/VachanaTTS` (written by `vachanatts` to `/app/voices`). Thai text is preprocessed (digits → Thai words, ๆ expansion) before synthesis.
 - **F5 specifics:** `./f5_models` holds the 1.35 GB `mega_f5_last.safetensors` + vocab + `ref_voice.wav`. The ref voice is synthesized once via MMS (`F5_REF_TEXT`) so the pipeline never triggers its whisper-based `transcribe()` (which would need a ~3 GB ASR model). F5 runs fp32 on the GTX 1060 (~1.6 GB VRAM, ~4 s/sentence cached). Requires `ffmpeg` (pydub).
 - **JaiTTS specifics:** `./jaitts_models` holds the 1.35 GB `model.pt` + vocab from `JTS-AI/JaiTTS-F5TTS` (Apache 2.0). Same `flowtts` pipeline as `f5`; vocab is byte-identical to F5's, so it reuses the same char set and the same MMS-built ref voice (`F5_REF_TEXT`). Uses `AudioConfig(cfg_strength=2.5)` per the JaiTTS quickstart. The XLM-R duration-predictor variant from the paper is not released — only the base F5 checkpoint. Warm synthesis ~2.3s on P100.
 - **Voice cloning (f5/jaitts):** zero-shot — the flowtts pipeline conditions on any (ref_wav, ref_text) pair. Registered voices live in `./ref_voices` (`{name}.wav` + `{name}.json`), volume-mounted and gitignored, and are NOT exposed via `/media/list`. Upload requires the exact transcript (phase 1; auto-transcribe with a local ASR is a possible phase 2 — the pipeline's built-in `transcribe()` would pull a ~3 GB whisper model). `ref`/`ref_text` on the TTS request clones from any existing file in `./output` or `./ref_voices`. Cloning quality depends on the clip: 5–20s, single speaker, clean audio, accurate transcript.
-- **GPU idle unload:** GPU models (Kokoro, MMS, F5, JaiTTS) are dropped from VRAM after `IDLE_UNLOAD_MINUTES` (default 10, set in docker-compose `environment`; `0` disables) with no API/web activity. A FastAPI middleware (`activity_middleware`) records activity + in-flight requests; a daemon thread polls every 30s and calls `_unload_gpu_models()` (drops singletons, `gc.collect()`, `torch.cuda.empty_cache()`). Re-init after unload is fast (weights on disk): F5 ~2s, MMS ~1s, Kokoro ~3s. CPU engines (Thai/Piper) stay loaded.
+- **OmniVoice specifics:** `./omnivoice_models/omnivoice-thai` holds the 2.45 GB fp32 `model.safetensors` (Qwen3-0.6B) + tokenizer files; the higgs audio tokenizer (0.8 GB) downloads into the HF cache. Loaded fp16 on GPU (~1.2 GB VRAM) via `_pick_device()`. `load_asr=False` because ref voices always carry transcripts — avoids a ~3 GB Whisper download. `generate(..., language="Thai", speed=request.speed/pace)`; no duration-scale patch needed (MaskGIT duration estimator, unlike flowtts). `instruct` voice-design mode is supported by the model but not yet exposed via the API.
+- **GPU idle unload:** GPU models (Kokoro, MMS, F5, JaiTTS, OmniVoice) are dropped from VRAM after `IDLE_UNLOAD_MINUTES` (default 10, set in docker-compose `environment`; `0` disables) with no API/web activity. A FastAPI middleware (`activity_middleware`) records activity + in-flight requests; a daemon thread polls every 30s and calls `_unload_gpu_models()` (drops singletons, `gc.collect()`, `torch.cuda.empty_cache()`). Re-init after unload is fast (weights on disk): F5 ~2s, MMS ~1s, Kokoro ~3s, OmniVoice ~2–4s (2.45 GB from disk). CPU engines (Thai/Piper) stay loaded.
 - **Thai duration scale (Dockerfile patch):** the flowtts UTF-8 byte-ratio duration formula underestimates for Thai, producing rushed speech at `speed=1.0` (JaiTTS paper calls this out). The Dockerfile patches the installed `flowtts/infer/utils_infer.py` to multiply the predicted duration by `F5_DURATION_SCALE` (env, default `1.8`, set in docker-compose). Also patches `flowtts/inference.py` to use unique per-request temp ref filenames (was fixed `temp_short_ref.wav`/`ref_converted.wav`). F5-family pipelines (f5, jaitts, and all clones) now sound natural at `speed=1.0`; the old workaround of `speed=0.5` is no longer needed.
 - **Voice clone tuning:** each registered voice has a `pace` (default 1.0) applied as `speed / pace` server-side — raise it if a clone sounds rushed, lower it if too slow. Adjustable after registration via `PATCH /api/ref-voices/{name}` or the ✎ button in the web UI. F5-family `ModelConfig` uses a fixed `seed=0` so cloned-voice outputs are reproducible (the default `-1` randomized sampling every call, which made clone fidelity vary run-to-run).
 - **Single worker:** Uvicorn runs without `--workers` to keep things simple.
@@ -248,3 +252,6 @@ Voice IDs follow the pattern `{a}{m/f}_{name}` where `a` = American English, `m`
 - [ ] Expose available voices via a `GET /voices` endpoint
 - [ ] Add streaming (chunked transfer) for long-form TTS
 - [x] Add a simple web UI (Gradio or custom HTML)
+- [ ] Expose OmniVoice `instruct` voice-design mode (e.g. `"male, low pitch"`) via an optional `instruct` field on `POST /v1/audio/speech` (model already supports it; only the API/UI plumbing is missing)
+- [ ] Pre-download OmniVoice model files in the Dockerfile so the first request doesn't wait on 2.45 GB
+- [ ] Add OmniVoice mid-generation CUDA OOM retry-on-CPU (currently only Kokoro has it)

@@ -39,15 +39,16 @@ def _touch_activity() -> None:
 
 def _unload_gpu_models() -> None:
     """Drop GPU singletons so VRAM is released; next request re-initializes."""
-    global pipeline, _mms, _f5, _jaitts
+    global pipeline, _mms, _f5, _jaitts, _omnivoice
     with _unload_lock:
-        if pipeline is None and _mms is None and _f5 is None and _jaitts is None:
+        if pipeline is None and _mms is None and _f5 is None and _jaitts is None and _omnivoice is None:
             return
         print(f"[server] Idle > {IDLE_UNLOAD_MINUTES:.0f} min — unloading GPU models from VRAM")
         pipeline = None
         _mms = None
         _f5 = None
         _jaitts = None
+        _omnivoice = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -150,6 +151,20 @@ JAITTS_DIR = BASE_DIR / "jaitts_models"
 JAITTS_CHECKPOINT = "https://huggingface.co/JTS-AI/JaiTTS-F5TTS/resolve/main/model.pt"
 JAITTS_VOCAB = "https://huggingface.co/JTS-AI/JaiTTS-F5TTS/resolve/main/vocab.txt"
 
+OMNIVOICE_DIR = BASE_DIR / "omnivoice_models"
+OMNIVOICE_REPO = "hotdogs/omnivoice-thai"
+OMNIVOICE_MODEL_DIR = OMNIVOICE_DIR / "omnivoice-thai"
+# Files needed for inference. The repo also ships training artifacts
+# (optimizer.bin 4.9 GB, scheduler.bin, random_states, scaler.pt) that a
+# plain snapshot_download would pull — fetch only what from_pretrained needs.
+OMNIVOICE_FILES = [
+    "config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+]
+
 KOKORO_VOICES = [
     {"id": "af_heart", "name": "Heart (warm female)"},
     {"id": "af_bella", "name": "Bella (bright female)"},
@@ -179,6 +194,10 @@ F5_VOICES = [
 
 JAITTS_VOICES = [
     {"id": "default", "name": "Default (auto-built ref voice)", "language": "Thai"},
+]
+
+OMNIVOICE_VOICES = [
+    {"id": "default", "name": "Auto voice (model picks; cloning via registered ref voices)", "language": "Thai"},
 ]
 
 PIPER_VOICES = [
@@ -223,6 +242,17 @@ def _download(url: str, dest: Path) -> None:
     with urllib.request.urlopen(url, timeout=120) as resp, open(tmp, "wb") as f:
         shutil.copyfileobj(resp, f)
     tmp.replace(dest)
+
+
+def _download_hf_file(repo_id: str, filename: str, dest_dir: Path) -> Path:
+    """Download a single HuggingFace file into dest_dir, skipping if present."""
+    dest = dest_dir / filename
+    if dest.exists() and dest.stat().st_size > 0:
+        return dest
+    from huggingface_hub import hf_hub_download
+    print(f"[server] Downloading {repo_id}/{filename} → {dest_dir.name}/")
+    hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(dest_dir))
+    return dest
 
 
 _piper_lock = threading.Lock()
@@ -372,6 +402,37 @@ def get_jaitts():
                 )
                 _jaitts = {"pipeline": pipeline, "ref": str(ref), "ref_text": F5_REF_TEXT}
     return _jaitts
+
+
+_omnivoice_lock = threading.Lock()
+_omnivoice = None
+
+
+def get_omnivoice():
+    """Lazy singleton for OmniVoice Thai (Qwen3-0.6B MaskGIT diffusion, GPU).
+
+    Voice cloning always supplies ref_text (our registered ref voices carry
+    transcripts), so load_asr=False — avoids a ~3 GB Whisper download that
+    would otherwise be used to auto-transcribe reference clips.
+    """
+    global _omnivoice
+    if _omnivoice is None:
+        with _omnivoice_lock:
+            if _omnivoice is None:
+                from omnivoice import OmniVoice
+                device = _pick_device()
+                OMNIVOICE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+                for f in OMNIVOICE_FILES:
+                    _download_hf_file(OMNIVOICE_REPO, f, OMNIVOICE_MODEL_DIR)
+                print(f"[server] Initializing OmniVoice Thai on {device}…")
+                model = OmniVoice.from_pretrained(
+                    str(OMNIVOICE_MODEL_DIR),
+                    device_map=device,
+                    dtype=torch.float16 if device != "cpu" else torch.float32,
+                    load_asr=False,
+                )
+                _omnivoice = {"model": model, "device": device, "ref": None, "ref_text": None}
+    return _omnivoice
 
 
 # ── Voice cloning (reference voices) ────────────────────────────────────
@@ -531,7 +592,7 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = "af_heart"
     speed: float = 1.0
-    engine: Literal["kokoro", "thai", "piper", "mms", "f5", "jaitts"] = "kokoro"
+    engine: Literal["kokoro", "thai", "piper", "mms", "f5", "jaitts", "omnivoice"] = "kokoro"
     # Voice cloning (f5/jaitts engines): reference an existing media file directly
     ref: Optional[str] = None
     ref_text: Optional[str] = None
@@ -594,6 +655,8 @@ async def list_voices(engine: str = "kokoro"):
         return F5_VOICES + _clone_voices()
     if engine == "jaitts":
         return JAITTS_VOICES + _clone_voices()
+    if engine == "omnivoice":
+        return OMNIVOICE_VOICES + _clone_voices()
     if engine == "piper":
         return PIPER_VOICES
     raise HTTPException(status_code=422, detail=f"Unknown engine: {engine}")
@@ -819,6 +882,25 @@ def _generate_jaitts(request: TTSRequest, out_path: Path) -> None:
         raise HTTPException(status_code=500, detail="JaiTTS produced no audio")
 
 
+def _generate_omnivoice(request: TTSRequest, out_path: Path) -> None:
+    om = get_omnivoice()
+    # Same ref resolution as F5/JaiTTS: request.ref file → registered voice →
+    # auto mode (no reference; the model picks a voice itself).
+    ref_audio, ref_text, pace = _resolve_ref_voice(om, request)
+    kwargs = {
+        "text": request.text,
+        "language": "Thai",
+        "speed": request.speed / pace,
+    }
+    if ref_audio:
+        kwargs["ref_audio"] = ref_audio
+        kwargs["ref_text"] = ref_text
+    audios = om["model"].generate(**kwargs)
+    if not audios or len(audios[0]) == 0:
+        raise HTTPException(status_code=500, detail="OmniVoice produced no audio")
+    sf.write(str(out_path), audios[0], om["model"].sampling_rate)
+
+
 def _is_oom(e: Exception) -> bool:
     return isinstance(e, RuntimeError) and "out of memory" in str(e).lower()
 
@@ -840,6 +922,8 @@ async def generate_speech(request: TTSRequest):
             _generate_f5(request, out_path)
         elif request.engine == "jaitts":
             _generate_jaitts(request, out_path)
+        elif request.engine == "omnivoice":
+            _generate_omnivoice(request, out_path)
         else:  # piper
             _generate_piper(request, out_path)
     except HTTPException:

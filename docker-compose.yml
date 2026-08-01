@@ -17,6 +17,7 @@ services:
       - ./pythai_voices:/app/voices
       - ./f5_models:/app/f5_models
       - ./jaitts_models:/app/jaitts_models
+      - ./omnivoice_models:/app/omnivoice_models
       - ./ref_voices:/app/ref_voices
     deploy:
       resources:

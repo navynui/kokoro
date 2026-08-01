@@ -1,6 +1,6 @@
 # Kokoro TTS Server
 
-A lightweight, production-ready local TTS server with **five local engines**: Kokoro-82M (GPU-accelerated on an NVIDIA GTX 1060 with automatic CPU fallback), Thai Vachana (PyThaiTTS, CPU/ONNX), Thai MMS (Meta, GPU), Thai Thonburian (F5-TTS Mega, GPU), and Piper (CPU/ONNX, 15+ languages). All inference runs locally — no cloud APIs.
+A lightweight, production-ready local TTS server with **seven local engines**: Kokoro-82M (GPU-accelerated on an NVIDIA GTX 1060 with automatic CPU fallback), Thai Vachana (PyThaiTTS, CPU/ONNX), Thai MMS (Meta, GPU), Thai Thonburian (F5-TTS Mega, GPU), Thai JaiTTS (F5-TTS base, GPU), Thai OmniVoice (Qwen3-0.6B MaskGIT, GPU), and Piper (CPU/ONNX, 15+ languages). All inference runs locally — no cloud APIs.
 
 Serves a REST API compatible with typical `/v1/audio/speech` patterns. Containerised with Docker for easy deployment.
 
@@ -40,7 +40,7 @@ Generate speech from text.
 | `text` | string | (required) | Text to synthesise |
 | `voice` | string | `"af_heart"` | Voice ID (see `/voices` per engine) |
 | `speed` | number | `1.0` | Speaking speed |
-| `engine` | string | `"kokoro"` | `kokoro` \| `thai` \| `piper` \| `mms` \| `f5` |
+| `engine` | string | `"kokoro"` | `kokoro` \| `thai` \| `piper` \| `mms` \| `f5` \| `jaitts` \| `omnivoice` |
 
 **Response:** WAV audio (`audio/wav`), 16-bit mono. Sample rate is engine-dependent (Kokoro 24 kHz, Thai/Piper 22.05 kHz).
 
@@ -107,6 +107,8 @@ Serve any media file with the correct MIME type for playback or download.
 | **Thai Vachana** (PyThaiTTS) | `thai` | CPU (ONNX) | Thai | `th_f_1`, `th_f_2`, `th_m_1`, `th_m_2` |
 | **Thai MMS** (Meta) | `mms` | GPU | Thai | `facebook/mms-tts-tha` (16 kHz) |
 | **Thai Thonburian** (F5-TTS Mega) | `f5` | GPU | Thai | `default` (auto-built ref voice, 24 kHz) |
+| **Thai JaiTTS** (F5-TTS base) | `jaitts` | GPU | Thai | `default` + registered voice clones (24 kHz) |
+| **Thai OmniVoice** (Qwen3-0.6B) | `omnivoice` | GPU | Thai | `default` (auto voice) + registered voice clones (24 kHz) |
 | **Piper** | `piper` | CPU (ONNX) | 15+ (EN, DE, FR, ES, IT, PT, RU, UK, VI, AR, ZH, NL, PL, TR, …) | curated list in `/voices` |
 
 The web UI exposes an **Engine** dropdown next to the voice picker; voice lists load from `/voices?engine=…`. Thai engines, best quality first: **Thonburian `f5`** (natural prosody, diffusion) → **MMS `mms`** (stable VITS) → **Vachana `thai`** (fast CPU).
@@ -117,6 +119,8 @@ The web UI exposes an **Engine** dropdown next to the voice picker; voice lists 
 - Thai: `pythai_voices/<voice>.onnx` (~60 MB each) from `VIZINTZOR/VachanaTTS`
 - MMS: `facebook/mms-tts-tha` (~145 MB) via the HuggingFace cache
 - Thonburian: `f5_models/mega_f5_last.safetensors` (**1.35 GB**) + auto-built ref voice
+- JaiTTS: `jaitts_models/model.pt` (**1.35 GB**) + auto-built ref voice
+- OmniVoice: `omnivoice_models/omnivoice-thai/` (**2.45 GB** model + **0.8 GB** higgs audio tokenizer) from `hotdogs/omnivoice-thai`
 
 ### curl examples
 
@@ -126,6 +130,12 @@ curl -X POST "http://localhost:8001/v1/audio/speech" \
   -H "Content-Type: application/json" \
   -d '{"text": "สวัสดีครับ", "engine": "f5", "voice": "default"}' \
   --output thai_best.wav
+
+# Thai — OmniVoice (MaskGIT diffusion, zero-shot cloning, 24 kHz)
+curl -X POST "http://localhost:8001/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "สวัสดีครับ", "engine": "omnivoice", "voice": "default"}' \
+  --output thai_omnivoice.wav
 
 # Thai — fast (Meta MMS)
 curl -X POST "http://localhost:8001/v1/audio/speech" \
@@ -207,6 +217,8 @@ ports:
 | Piper voices | `./piper_models` | `/app/piper_models` | Piper ONNX voices (~60 MB each) |
 | Thai voices | `./pythai_voices` | `/app/voices` | Thai Vachana ONNX voices (~60 MB each) |
 | Thonburian models | `./f5_models` | `/app/f5_models` | F5-TTS Mega checkpoint (1.35 GB) + ref voice |
+| JaiTTS models | `./jaitts_models` | `/app/jaitts_models` | JaiTTS-F5TTS checkpoint (1.35 GB) + ref voice |
+| OmniVoice models | `./omnivoice_models` | `/app/omnivoice_models` | OmniVoice Thai checkpoint (2.45 GB) + tokenizer files |
 
 To clear the model cache and force a fresh download:
 
@@ -223,7 +235,7 @@ rm -f output/*.wav
 
 ### GPU Acceleration
 
-GPU engines (Kokoro, Thai MMS, Thai Thonburian/F5) run on the **fastest available GPU**: the host's **Tesla P100 (16 GB)** first, falling back to the **GTX 1060 (6 GB)**, then CPU if neither is usable. Verified: cached F5 synthesis ~2.2s on P100 vs ~4.4s on 1060.
+GPU engines (Kokoro, Thai MMS, Thai Thonburian/F5, JaiTTS, OmniVoice) run on the **fastest available GPU**: the host's **Tesla P100 (16 GB)** first, falling back to the **GTX 1060 (6 GB)**, then CPU if neither is usable. Verified: cached F5 synthesis ~2.2s on P100 vs ~4.4s on 1060.
 
 **How it's configured:**
 
@@ -256,7 +268,7 @@ GPU engines (Kokoro, Thai MMS, Thai Thonburian/F5) run on the **fastest availabl
 
 Kokoro and MMS need ~1 GB VRAM; F5 needs ~1.7 GB, so OOM is unlikely unless other processes are using the cards.
 
-**GPU idle unload:** To free VRAM for other host workloads, GPU models (Kokoro, MMS, F5) are unloaded after **10 minutes** with no API/web activity — the next request re-initializes them from disk (~1–3s). Configure via `IDLE_UNLOAD_MINUTES` in `docker-compose.yml` (set to `0` to disable). Any request resets the timer, and an in-flight request is never interrupted.
+**GPU idle unload:** To free VRAM for other host workloads, GPU models (Kokoro, MMS, F5, JaiTTS, OmniVoice) are unloaded after **10 minutes** with no API/web activity — the next request re-initializes them from disk (~1–4s). Configure via `IDLE_UNLOAD_MINUTES` in `docker-compose.yml` (set to `0` to disable). Any request resets the timer, and an in-flight request is never interrupted.
 
 ## Project Structure
 
@@ -271,6 +283,8 @@ Kokoro and MMS need ~1 GB VRAM; F5 needs ~1.7 GB, so OOM is unlikely unless othe
 ├── piper_models/        # Downloaded Piper ONNX voices (gitignored)
 ├── pythai_voices/       # Downloaded Thai Vachana ONNX voices (gitignored)
 ├── f5_models/           # Downloaded Thonburian F5 checkpoint (gitignored)
+├── jaitts_models/       # Downloaded JaiTTS-F5TTS checkpoint (gitignored)
+├── omnivoice_models/    # Downloaded OmniVoice Thai model (gitignored)
 ├── .gitignore
 ├── README.md            # This file
 ├── AGENTS.md            # AI assistant context

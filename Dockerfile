@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
         kokoro>=0.9.2 \
         piper-tts>=1.6.0 \
         pythaitts>=0.4.2 \
+        omnivoice>=0.2.1 \
         soundfile>=0.13.0 \
         numpy>=1.26.0 && \
     # ThonburianTTS (F5-TTS Thai) — pulls f5-tts + vocos + librosa etc.
