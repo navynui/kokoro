@@ -8,6 +8,7 @@ import threading
 import soundfile as sf
 import numpy as np
 import uuid
+import hashlib
 import shutil
 import urllib.request
 import os
@@ -935,6 +936,46 @@ def _generate_jaitts(request: TTSRequest, out_path: Path) -> None:
         raise HTTPException(status_code=500, detail="JaiTTS produced no audio")
 
 
+# ── Voice freezing (OmniVoice design voices) ────────────────────────────
+# Voice design is stochastic: every generate() samples a fresh voice, so
+# separate API calls (e.g. per-line narration clips) sound different even
+# with the same preset. Fix: freeze the designed voice into a fixed ref
+# clip on first use, then clone from it — zero-shot cloning conditions on
+# the same ref audio, so every later call shares one consistent voice.
+# A fixed seed also makes output deterministic (identical request →
+# identical audio). Delete omnivoice_models/frozen/<key>.wav to reset.
+
+OMNIVOICE_FREEZE_TEXT = "สวัสดีครับ นี่คือเสียงตัวอย่างสำหรับวิดีโอ"
+OMNIVOICE_FROZEN_DIR = OMNIVOICE_DIR / "frozen"
+
+
+def _get_frozen_ref(om: dict, key: str, instruct: str) -> tuple[str, str]:
+    """Return (ref_wav, ref_text) for a frozen voice-design voice.
+
+    Generates a fixed Thai sentence with the instruct on first use and
+    caches it; later calls clone from the cached clip so every request
+    with the same key/instruct shares one consistent voice.
+    """
+    OMNIVOICE_FROZEN_DIR.mkdir(parents=True, exist_ok=True)
+    ref = OMNIVOICE_FROZEN_DIR / f"{key}.wav"
+    if ref.exists() and ref.stat().st_size > 0:
+        return str(ref), OMNIVOICE_FREEZE_TEXT
+    print(f"[server] Freezing OmniVoice design voice '{key}' ({instruct})…")
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    audios = om["model"].generate(
+        text=OMNIVOICE_FREEZE_TEXT,
+        language="Thai",
+        instruct=instruct,
+    )
+    if not audios or len(audios[0]) == 0:
+        raise HTTPException(status_code=500, detail="OmniVoice failed to freeze design voice")
+    tmp = ref.with_suffix(".tmp")
+    sf.write(str(tmp), audios[0], om["model"].sampling_rate, format="WAV")
+    tmp.replace(ref)
+    return str(ref), OMNIVOICE_FREEZE_TEXT
+
+
 def _preprocess_omnivoice_text(text: str) -> str:
     """Normalize Thai numerals/percent for OmniVoice synthesis.
 
@@ -959,8 +1000,11 @@ def _generate_omnivoice(request: TTSRequest, out_path: Path) -> None:
     om = get_omnivoice()
     kwargs = {"text": _preprocess_omnivoice_text(request.text), "language": "Thai", "speed": request.speed}
     if request.instruct:
-        # Explicit voice-design instruction (power users) — overrides everything
-        kwargs["instruct"] = request.instruct
+        # Free-form voice-design instruction — frozen per instruct string
+        key = "instruct-" + hashlib.md5(request.instruct.encode("utf-8")).hexdigest()[:8]
+        ref_audio, ref_text = _get_frozen_ref(om, key, request.instruct)
+        kwargs["ref_audio"] = ref_audio
+        kwargs["ref_text"] = ref_text
     elif request.ref:
         # Clone from an arbitrary file in ./output or ./ref_voices
         ref_audio, ref_text, pace = _resolve_ref_voice(om, request)
@@ -968,8 +1012,10 @@ def _generate_omnivoice(request: TTSRequest, out_path: Path) -> None:
         kwargs["ref_audio"] = ref_audio
         kwargs["ref_text"] = ref_text
     elif request.voice in OMNIVOICE_DESIGN_INSTRUCT:
-        # Curated voice-design preset (no ref audio needed)
-        kwargs["instruct"] = OMNIVOICE_DESIGN_INSTRUCT[request.voice]
+        # Curated voice-design preset — frozen on first use, then cloned
+        ref_audio, ref_text = _get_frozen_ref(om, request.voice, OMNIVOICE_DESIGN_INSTRUCT[request.voice])
+        kwargs["ref_audio"] = ref_audio
+        kwargs["ref_text"] = ref_text
     else:
         # Registered ref voice → auto voice (the model picks)
         ref_audio, ref_text, pace = _resolve_ref_voice(om, request)
@@ -977,6 +1023,9 @@ def _generate_omnivoice(request: TTSRequest, out_path: Path) -> None:
         if ref_audio:
             kwargs["ref_audio"] = ref_audio
             kwargs["ref_text"] = ref_text
+    # Fixed seed → deterministic output (identical request → identical audio)
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
     audios = om["model"].generate(**kwargs)
     if not audios or len(audios[0]) == 0:
         raise HTTPException(status_code=500, detail="OmniVoice produced no audio")
